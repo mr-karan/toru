@@ -1,0 +1,18 @@
+[server]
+address = ":8888"
+log_level = "info"
+fetch_timeout = "30s"
+
+[cache]
+enabled = true
+type = "s3"
+
+[cache.s3]
+region = "us-west-2"
+bucket = "my-go-proxy-cache"
+access_key = "YOUR_ACCESS_KEY"
+secret_key = "YOUR_SECRET_KEY"
+
+[[rewrite_rules]]
+vanity_path = "example.com/mymodule"
+target_path = "github.com/example/mymodule"
