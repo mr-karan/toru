@@ -1,16 +1,12 @@
 # Build stage
-FROM golang:1.22
-
-# Final stage
-
-FROM ubuntu:24.04
-
+FROM golang:1.22 AS builder
 ENV GO111MODULE=on
 
-COPY --from=builder /usr/local/go/bin/go /bin/go
+RUN apt-get update && apt-get install -y ca-certificates
+
 COPY toru.bin /bin/toru
 COPY config.sample.toml /config/config.toml
 
 EXPOSE 8888
 
-CMD ["/bin/toru", "-config=/config/config.toml"]
+CMD ["/bin/toru", "--config=/config/config.toml"]

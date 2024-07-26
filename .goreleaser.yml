@@ -56,6 +56,11 @@ dockers:
     # Defaults to docker.
     use: docker
 
+    extra_files:
+      - config.sample.toml
+      - README.md
+      - LICENSE
+
     # Template of the docker build flags.
     build_flag_templates:
       - "--pull"

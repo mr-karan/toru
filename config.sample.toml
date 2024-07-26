@@ -5,13 +5,16 @@ fetch_timeout = "30s"
 
 [cache]
 enabled = true
-type = "s3"
+type = "disk"
 
-[cache.s3]
-region = "us-west-2"
-bucket = "my-go-proxy-cache"
-access_key = "YOUR_ACCESS_KEY"
-secret_key = "YOUR_SECRET_KEY"
+[cache.disk]
+path = "/tmp/toru-cache"
+
+# [cache.s3]
+# region = "us-west-2"
+# bucket = "my-go-proxy-cache"
+# access_key = "YOUR_ACCESS_KEY"
+# secret_key = "YOUR_SECRET_KEY"
 
 [[rewrite_rules]]
 vanity_path = "example.com/mymodule"
