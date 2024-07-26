@@ -1,6 +1,8 @@
 # toru
 
-_Toru is a Go module proxy with caching and rewrite capabilities._
+_Toru is a Go module proxy with caching and rewrite capabilities, built on top of the [goproxy/goproxy](https://github.com/goproxy/goproxy) library._
+
+Toru extends the functionality by adding features such as caching (S3) and configurable rewrite rules for module paths.
 
 ## Features
 
@@ -8,6 +10,40 @@ _Toru is a Go module proxy with caching and rewrite capabilities._
 - Supports caching (S3 and disk)
 - Configurable rewrite rules for module paths
 - Prometheus-compatible metrics endpoint
+
+## Running with Docker
+
+You can use the following command to run Toru using Docker:
+
+```bash
+docker run --rm -p 8888:8888 ghcr.io/mr-karan/toru:latest
+```
+
+## Rewrite Rules
+
+Toru supports rewrite rules that allow you to map vanity import paths to their actual repository locations. This feature is particularly useful for organizations that want to use custom import paths for their Go packages.
+
+### Example
+
+Consider the following rewrite rule in your `config.toml`:
+
+```toml
+[[rewrite_rules]]
+vanity_path = "go.corp.com"
+target_path = "gitlab.corp.com"
+```
+
+With this rule in place:
+
+1. When a user tries to fetch a package with the import path `go.corp.com/awesome-pkg`, Toru intercepts this request.
+2. Instead of looking for the package at `go.corp.com/awesome-pkg`, Toru rewrites the request to `gitlab.corp.com/awesome-pkg`.
+3. Toru then fetches the package from the actual repository location at `gitlab.corp.com/awesome-pkg`.
+
+### Why is this useful?
+
+1. **Vanity URLs**: You can use a clean, memorable vanity URL for your packages, making it easier for user to import them.
+2. **Repository abstraction**: You can change the underlying repository location without affecting the import paths used by your user.
+3. **Private repositories**: You can use rewrite rules to map public vanity URLs to private repository locations, allowing you to control access to your internal packages.
 
 ## Configuration
 
@@ -35,4 +71,26 @@ toru_upstream_fetch_duration_seconds: Upstream fetch duration
 toru_response_size_bytes: Response size
 toru_rewrite_rules_applied_total: Number of times rewrite rules were applied
 toru_errors_total: Total number of errors encountered
+```
+
+
+## Authentication for Private Repositories
+
+### Using .netrc
+
+Create or edit the `.netrc` file in your home directory:
+
+```
+machine gitlab.corp.com
+login your-username
+password your-access-token
+```
+
+### Using Git Configuration
+
+Add this to your `.gitconfig`
+
+```
+[url "ssh://git@gitlab.corp.com"]
+	insteadOf = https://gitlab.corp.com
 ```
