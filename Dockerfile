@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y ca-certificates
 COPY toru.bin /bin/toru
 COPY config.sample.toml /config/config.toml
 
-RUN [ ! -e /etc/nsswitch.conf ] && echo 'hosts: files dns' > /etc/nsswitch.conf
+RUN if [ ! -e /etc/nsswitch.conf ]; then echo 'hosts: files dns' > /etc/nsswitch.conf; fi
 
 EXPOSE 8888
 
