@@ -1,3 +1,5 @@
+<a href="https://zerodha.tech"><img src="https://zerodha.tech/static/images/github-badge.svg" align="right" /></a>
+
 # toru
 
 _Toru is a Go module proxy with caching and rewrite capabilities, built on top of the [goproxy/goproxy](https://github.com/goproxy/goproxy) library._
