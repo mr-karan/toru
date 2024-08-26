@@ -16,6 +16,15 @@ path = "/tmp/toru-cache"
 # access_key = "YOUR_ACCESS_KEY"
 # secret_key = "YOUR_SECRET_KEY"
 
+[auth]
+enabled = false
+
+[auth.modules]
+name = "gitlab"
+type = "gitlab_access_token"
+options.root_url = "https://gitlab.corp.tech"
+options.protected_uri = "corp.tech"
+
 [[rewrite_rules]]
 vanity_path = "example.com/mymodule"
 target_path = "github.com/example/mymodule"

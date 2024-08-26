@@ -78,7 +78,9 @@ toru_errors_total: Total number of errors encountered
 
 ## Authentication for Private Repositories
 
-### Using .netrc
+### For the Proxy
+
+#### Using .netrc
 
 Create or edit the `.netrc` file in your home directory:
 
@@ -88,11 +90,36 @@ login your-username
 password your-access-token
 ```
 
-### Using Git Configuration
+#### Using Git Configuration
 
 Add this to your `.gitconfig`
 
 ```
 [url "ssh://git@gitlab.corp.com"]
 	insteadOf = https://gitlab.corp.com
+```
+
+### Client-side Authentication
+
+Toru provides support for client-side authentication through authentication modules.
+
+To enable authentication, you can specify the modules in your configuration file:
+
+```toml
+[auth.modules]
+name = "gitlab"
+type = "gitlab_access_token"
+options.root_url = "https://gitlab.corp.tech"
+options.protected_uri = "corp.tech"
+```
+
+#### GitLab Access Token
+
+By providing the GitLab access token in the basic auth, clients can authenticate 
+with the GitLab API to check if the user has access to the repository.
+
+To authenticate using the access token, use the following command:
+
+```bash
+export GOPROXY=https://gitlab:<access_token>@toru.corp.io:9443
 ```
