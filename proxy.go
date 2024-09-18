@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -122,8 +121,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Println("Authenticating", username, password, r.URL.Path)
-
 		// Check if the credentials are valid
 		skip, hasAccess, err := auth.Authenticate(password, r.URL.Path)
 		if err != nil {
@@ -135,7 +132,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
-		log.Println("Has access", hasAccess, "skip", skip)
 
 		if !hasAccess && !skip {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)

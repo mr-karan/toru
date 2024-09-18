@@ -3,7 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
-	"log"
+	"net/http"
 	"strings"
 
 	"github.com/xanzy/go-gitlab"
@@ -32,69 +32,50 @@ func (g *GitLabAuthenticator) Authenticate(token, uri string) (bool, bool, error
 		hasAccess = false
 	)
 
-	// Check if the project path is protected.
-	// If the project path is not protected, skip the authentication.
-	// Trim the leading slash
-	uri = uri[1:]
+	// Trim the leading slash from the URI
+	uri = strings.TrimPrefix(uri, "/")
 
 	// Check if the URI is protected.
 	if !strings.HasPrefix(uri, g.ProtectedURI) {
-		fmt.Println("skipping authentication", uri, g.ProtectedURI)
 		skip = true
 		return skip, hasAccess, nil
 	}
 
-	// Check if URI contains `/@`.
-	if !strings.Contains(uri, "/@") {
-		return skip, hasAccess, fmt.Errorf("invalid URI")
-	}
-
-	// Remove the protectedURI from the URI. And extract till `/@`.
-	// This will give us the project path.
+	// Remove the ProtectedURI prefix and extract the project path before '/@'
 	path := strings.TrimPrefix(uri, g.ProtectedURI)
 	path = strings.Split(path, "/@")[0]
 	path = strings.TrimPrefix(path, "/")
 
-	log.Println("extracted path", path)
-
+	// Split the path into components to get namespace and project name
 	parts := strings.Split(path, "/")
 	if len(parts) < 2 {
 		return skip, hasAccess, fmt.Errorf("invalid project path")
 	}
 
-	// Check if the project path is empty.
-	pathWithNamespace := parts[0] + "/" + parts[1]
+	// Construct the project path with namespace
+	pathWithNamespace := strings.Join(parts[:2], "/") // assuming the first two parts are namespace and project name
 	if pathWithNamespace == "" {
 		return skip, hasAccess, fmt.Errorf("project path is empty")
 	}
 
+	// Create a new GitLab client with the user's token
 	gl, err := gitlab.NewClient(token, gitlab.WithBaseURL(g.RootURL))
 	if err != nil {
 		return skip, hasAccess, fmt.Errorf("failed to create GitLab client: %w", err)
 	}
 
-	isSimple := true
-	prj, _, err := gl.Projects.ListProjects(&gitlab.ListProjectsOptions{
-		Simple: &isSimple,
-	})
+	// Get the project details
+	prj, resp, err := gl.Projects.GetProject(pathWithNamespace, nil, nil)
 	if err != nil {
-		if strings.Contains(err.Error(), "401 Unauthorized") {
-			return skip, hasAccess, ErrorAuthFailed
-		}
-		return skip, hasAccess, fmt.Errorf("failed to list projects: %w", err)
-	}
-
-	if len(prj) == 0 || prj == nil {
-		return skip, hasAccess, fmt.Errorf("projects not found")
-	}
-
-	for _, p := range prj {
-		if p.PathWithNamespace == pathWithNamespace {
-			skip = false
-			hasAccess = true
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
 			return skip, hasAccess, nil
 		}
-		fmt.Println(p.PathWithNamespace, pathWithNamespace, skip, hasAccess)
+
+		return skip, hasAccess, fmt.Errorf("failed to get project: %w", err)
+	}
+
+	if prj != nil {
+		hasAccess = true
 	}
 
 	return skip, hasAccess, nil
