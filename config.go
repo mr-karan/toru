@@ -40,6 +40,31 @@ type Config struct {
 		VanityPath string `koanf:"vanity_path"`
 		TargetPath string `koanf:"target_path"`
 	} `koanf:"rewrite_rules"`
+
+	Auth struct {
+		// Enabled is a flag to enable or disable the auth module.
+		Enabled bool `koanf:"enabled"`
+
+		// Modules is a list of auth modules.
+		Modules []AuthModule `koanf:"modules"`
+	} `koanf:"auth"`
+}
+
+// AuthModule represents an auth module configuration.
+// Auth modules are used to authenticate users.
+// The auth module implementation is determined by the Type field.
+type AuthModule struct {
+	// Name of the auth module. This is used to identify the module via
+	// the username in basic auth.
+	Name string `koanf:"name"`
+
+	// Type of the auth module. This is used to identify the module
+	// implementation.
+	Type string `koanf:"type"`
+
+	// Options is a map of options specific to the auth module. These
+	// are used to configure the auth module.
+	Options map[string]interface{} `koanf:"options"`
 }
 
 // initConfig loads config and returns a Config instance.

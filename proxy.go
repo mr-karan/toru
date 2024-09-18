@@ -12,10 +12,11 @@ import (
 )
 
 type Proxy struct {
-	client *goproxy.Goproxy
-	cfg    *Config
-	logger *slog.Logger
-	server *http.Server
+	client         *goproxy.Goproxy
+	cfg            *Config
+	logger         *slog.Logger
+	server         *http.Server
+	authenticators map[string]Authenticator
 }
 
 func newProxy(cfg *Config, logger *slog.Logger) (*Proxy, error) {
@@ -67,11 +68,23 @@ func newProxy(cfg *Config, logger *slog.Logger) (*Proxy, error) {
 		},
 	}
 
+	authenticators := make(map[string]Authenticator)
+	if cfg.Auth.Enabled {
+		for _, module := range cfg.Auth.Modules {
+			auth, err := NewAuthenticator(module)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create authenticator: %w", err)
+			}
+			authenticators[module.Name] = auth
+		}
+	}
+
 	return &Proxy{
-		client: client,
-		cfg:    cfg,
-		logger: logger,
-		server: server,
+		client:         client,
+		cfg:            cfg,
+		logger:         logger,
+		server:         server,
+		authenticators: authenticators,
 	}, nil
 }
 
@@ -92,6 +105,39 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"path", r.URL.Path,
 		"remote_addr", r.RemoteAddr,
 	)
+
+	if p.cfg.Auth.Enabled {
+		// Extract credentials from the request
+		username, password, ok := r.BasicAuth()
+		if !ok {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		// Check if the module is enabled
+		auth, ok := p.authenticators[username]
+		if !ok {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		// Check if the credentials are valid
+		skip, hasAccess, err := auth.Authenticate(password, r.URL.Path)
+		if err != nil {
+			p.logger.Error("Failed to authenticate", "error", err)
+			if err == ErrorAuthFailed {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		if !hasAccess && !skip {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
 
 	// Wrap the ResponseWriter to capture the response size
 	rw := &responseWriter{ResponseWriter: w}
