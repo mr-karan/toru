@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -14,7 +15,8 @@ type Authenticator interface {
 }
 
 var (
-	_ = Authenticator(&GitLabAuthenticator{})
+	_               = Authenticator(&GitLabAuthenticator{})
+	ErrorAuthFailed = errors.New("authentication failed")
 )
 
 // GitLabAuthenticator is a struct that implements the Authenticator interface.
@@ -37,6 +39,7 @@ func (g *GitLabAuthenticator) Authenticate(token, uri string) (bool, bool, error
 
 	// Check if the URI is protected.
 	if !strings.HasPrefix(uri, g.ProtectedURI) {
+		fmt.Println("skipping authentication", uri, g.ProtectedURI)
 		skip = true
 		return skip, hasAccess, nil
 	}
@@ -75,6 +78,9 @@ func (g *GitLabAuthenticator) Authenticate(token, uri string) (bool, bool, error
 		Simple: &isSimple,
 	})
 	if err != nil {
+		if strings.Contains(err.Error(), "401 Unauthorized") {
+			return skip, hasAccess, ErrorAuthFailed
+		}
 		return skip, hasAccess, fmt.Errorf("failed to list projects: %w", err)
 	}
 
@@ -88,6 +94,7 @@ func (g *GitLabAuthenticator) Authenticate(token, uri string) (bool, bool, error
 			hasAccess = true
 			return skip, hasAccess, nil
 		}
+		fmt.Println(p.PathWithNamespace, pathWithNamespace, skip, hasAccess)
 	}
 
 	return skip, hasAccess, nil
