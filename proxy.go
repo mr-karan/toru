@@ -108,16 +108,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if p.cfg.Auth.Enabled {
 		// Extract credentials from the request
-		username, password, ok := r.BasicAuth()
+		authMethod, password, ok := r.BasicAuth()
 		if !ok {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			http.Error(w, "No username or password provided", http.StatusUnauthorized)
 			return
 		}
 
 		// Check if the module is enabled
-		auth, ok := p.authenticators[username]
+		auth, ok := p.authenticators[authMethod]
 		if !ok {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			http.Error(w, "Invalid auth method", http.StatusBadRequest)
 			return
 		}
 
@@ -126,7 +126,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			p.logger.Error("Failed to authenticate", "error", err)
 			if err == ErrorAuthFailed {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				http.Error(w, "Unauthorized: Invalid access token or insufficient permissions for the GitLab project", http.StatusForbidden)
 				return
 			}
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -134,7 +134,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if !hasAccess && !skip {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			http.Error(w, "Unauthorized: Invalid access token or insufficient permissions for the GitLab project", http.StatusForbidden)
 			return
 		}
 	}

@@ -70,6 +70,9 @@ func (g *GitLabAuthenticator) Authenticate(token, uri string) (bool, bool, error
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
 			return skip, hasAccess, nil
 		}
+		if strings.Contains(err.Error(), "401 Unauthorized") {
+			return skip, hasAccess, ErrorAuthFailed
+		}
 
 		return skip, hasAccess, fmt.Errorf("failed to get project: %w", err)
 	}
