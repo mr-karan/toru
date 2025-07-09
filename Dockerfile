@@ -8,9 +8,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl unzip \
     git wget \
     && apt-get clean && rm -fr /var/lib/apt/lists/*
 
-# Install Go 1.22.5
-RUN wget https://go.dev/dl/go1.22.5.linux-amd64.tar.gz
-RUN tar -xvf go1.22.5.linux-amd64.tar.gz
+# Install Go 1.24.5
+RUN wget https://go.dev/dl/go1.24.5.linux-amd64.tar.gz
+RUN tar -xvf go1.24.5.linux-amd64.tar.gz
 RUN mv go /usr/local
 ENV PATH $PATH:/usr/local/go/bin
 
