@@ -36,9 +36,9 @@ func newProxy(cfg *Config, logger *slog.Logger) (*Proxy, error) {
 	if cfg.Cache.Enabled {
 		switch cfg.Cache.Type {
 		case "s3":
-			cacher, err = newS3Cacher(cfg)
+			cacher, err = newS3Cacher(cfg, logger)
 		case "disk":
-			cacher = goproxy.DirCacher(cfg.Cache.Disk.Path)
+			cacher = newDiskCacher(cfg.Cache.Disk.Path, logger)
 		default:
 			return nil, fmt.Errorf("unsupported cache type: %s", cfg.Cache.Type)
 		}

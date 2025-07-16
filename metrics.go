@@ -20,4 +20,10 @@ var (
 
 	// Errors encountered
 	errorsTotal = metrics.NewCounter("toru_errors_total")
+
+	// Cache metrics
+	cacheHits   = metrics.NewCounter("toru_cache_hits_total")
+	cacheMisses = metrics.NewCounter("toru_cache_misses_total")
+	cacheWrites = metrics.NewCounter("toru_cache_writes_total")
+	cacheErrors = metrics.NewCounter("toru_cache_errors_total")
 )
