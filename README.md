@@ -74,8 +74,6 @@ just build
 just run
 ```
 
-If you still prefer Make, the existing `Makefile` remains available.
-
 This will build the binary and run it with the default configuration file (`config.toml`).
 
 ## Metrics
