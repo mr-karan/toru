@@ -23,9 +23,10 @@ type Config struct {
 	} `koanf:"server"`
 
 	Cache struct {
-		Enabled bool   `koanf:"enabled"`
-		Type    string `koanf:"type"`
-		S3      struct {
+		Enabled            bool          `koanf:"enabled"`
+		Type               string        `koanf:"type"`
+		MutableMetadataTTL time.Duration `koanf:"mutable_metadata_ttl"`
+		S3                 struct {
 			Region    string `koanf:"region"`
 			Bucket    string `koanf:"bucket"`
 			AccessKey string `koanf:"access_key"`

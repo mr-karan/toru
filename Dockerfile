@@ -1,22 +1,22 @@
-# Build stage
-FROM ubuntu:24.04
-ENV GO111MODULE=on
-ENV DEBIAN_FRONTEND=noninteractive
+FROM golang:1.26.1-bookworm AS go-runtime
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl unzip \
-    ca-certificates tzdata make \
-    git wget \
-    && apt-get clean && rm -fr /var/lib/apt/lists/*
+FROM debian:bookworm-slim
 
-# Install Go 1.24.5
-RUN wget https://go.dev/dl/go1.24.5.linux-amd64.tar.gz
-RUN tar -xvf go1.24.5.linux-amd64.tar.gz
-RUN mv go /usr/local
-ENV PATH $PATH:/usr/local/go/bin
+ENV GO111MODULE=on \
+    DEBIAN_FRONTEND=noninteractive \
+    PATH=/usr/local/go/bin:${PATH}
 
-COPY toru.bin /bin/toru
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=go-runtime /usr/local/go /usr/local/go
+COPY toru.bin /usr/local/bin/toru
 COPY config.sample.toml /config/config.toml
 
 EXPOSE 8888
 
-CMD ["/bin/toru", "--config=/config/config.toml"]
+ENTRYPOINT ["/usr/local/bin/toru"]
+CMD ["--config=/config/config.toml"]

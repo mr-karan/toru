@@ -6,6 +6,7 @@ fetch_timeout = "30s"
 [cache]
 enabled = true
 type = "disk"
+mutable_metadata_ttl = "0s" # 0 disables persistent cache for /@v/list, /@latest, and mutable .info queries
 
 [cache.disk]
 path = "/tmp/toru-cache"
@@ -22,8 +23,8 @@ enabled = false
 [auth.modules]
 name = "gitlab"
 type = "gitlab_access_token"
-options.root_url = "https://gitlab.corp.tech"
-options.protected_uri = "corp.tech"
+options.root_url = "https://gitlab.example.com"
+options.protected_uri = "go.example.com"
 
 [[rewrite_rules]]
 vanity_path = "example.com/mymodule"

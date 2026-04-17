@@ -19,9 +19,13 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: 1.24
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Run tests
+        run: go test ./...
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -31,7 +35,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v5
+        uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
           args: release --clean

@@ -4,9 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
-	"github.com/xanzy/go-gitlab"
+	gitlab "gitlab.com/gitlab-org/api/client-go/v2"
 )
 
 // Authentiactor interface defines the methods to authenticate the user.
@@ -27,61 +28,69 @@ type GitLabAuthenticator struct {
 
 // Authenticate method authenticates the user based on the token and project path.
 func (g *GitLabAuthenticator) Authenticate(token, uri string) (bool, bool, error) {
-	var (
-		skip      = false
-		hasAccess = false
-	)
-
-	// Trim the leading slash from the URI
-	uri = strings.TrimPrefix(uri, "/")
-
-	// Check if the URI is protected.
-	if !strings.HasPrefix(uri, g.ProtectedURI) {
-		skip = true
-		return skip, hasAccess, nil
-	}
-
-	// Remove the ProtectedURI prefix and extract the project path before '/@'
-	path := strings.TrimPrefix(uri, g.ProtectedURI)
-	path = strings.Split(path, "/@")[0]
-	path = strings.TrimPrefix(path, "/")
-
-	// Split the path into components to get namespace and project name
-	parts := strings.Split(path, "/")
-	if len(parts) < 2 {
-		return skip, hasAccess, fmt.Errorf("invalid project path")
-	}
-
-	// Construct the project path with namespace
-	pathWithNamespace := strings.Join(parts[:2], "/") // assuming the first two parts are namespace and project name
-	if pathWithNamespace == "" {
-		return skip, hasAccess, fmt.Errorf("project path is empty")
+	projectCandidates, skip, err := extractProjectCandidates(uri, g.ProtectedURI)
+	if err != nil || skip {
+		return skip, false, err
 	}
 
 	// Create a new GitLab client with the user's token
 	gl, err := gitlab.NewClient(token, gitlab.WithBaseURL(g.RootURL))
 	if err != nil {
-		return skip, hasAccess, fmt.Errorf("failed to create GitLab client: %w", err)
+		return skip, false, fmt.Errorf("failed to create GitLab client: %w", err)
 	}
 
-	// Get the project details
-	prj, resp, err := gl.Projects.GetProject(pathWithNamespace, nil, nil)
-	if err != nil {
-		if resp != nil && resp.StatusCode == http.StatusNotFound {
-			return skip, hasAccess, nil
+	for _, projectPath := range projectCandidates {
+		prj, resp, err := gl.Projects.GetProject(projectPath, nil)
+		if err != nil {
+			if resp != nil && resp.StatusCode == http.StatusNotFound {
+				continue
+			}
+			if resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+				return skip, false, ErrorAuthFailed
+			}
+			if strings.Contains(err.Error(), "401 Unauthorized") || strings.Contains(err.Error(), "403 Forbidden") {
+				return skip, false, ErrorAuthFailed
+			}
+
+			return skip, false, fmt.Errorf("failed to get project: %w", err)
 		}
-		if strings.Contains(err.Error(), "401 Unauthorized") {
-			return skip, hasAccess, ErrorAuthFailed
+
+		if prj != nil {
+			return skip, true, nil
 		}
-
-		return skip, hasAccess, fmt.Errorf("failed to get project: %w", err)
 	}
 
-	if prj != nil {
-		hasAccess = true
+	return skip, false, nil
+}
+
+func extractProjectCandidates(uri, protectedURI string) ([]string, bool, error) {
+	trimmedURI := strings.TrimPrefix(uri, "/")
+	protectedURI = strings.Trim(strings.TrimPrefix(protectedURI, "/"), "/")
+	if protectedURI == "" {
+		return nil, false, fmt.Errorf("protected_uri is empty")
+	}
+	if trimmedURI != protectedURI && !strings.HasPrefix(trimmedURI, protectedURI+"/") {
+		return nil, true, nil
 	}
 
-	return skip, hasAccess, nil
+	projectPath := strings.TrimPrefix(trimmedURI, protectedURI)
+	projectPath = strings.Split(projectPath, "/@")[0]
+	projectPath = strings.TrimPrefix(projectPath, "/")
+	if projectPath == "" {
+		return nil, false, fmt.Errorf("project path is empty")
+	}
+
+	parts := strings.Split(projectPath, "/")
+	if len(parts) < 2 {
+		return nil, false, fmt.Errorf("invalid project path")
+	}
+
+	projectCandidates := make([]string, 0, len(parts)-1)
+	for i := len(parts); i >= 2; i-- {
+		projectCandidates = append(projectCandidates, strings.Join(parts[:i], "/"))
+	}
+
+	return slices.Compact(projectCandidates), false, nil
 }
 
 // NewGitlabAuthenticator creates a new GitLab authenticator.
