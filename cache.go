@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -16,7 +17,147 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/goproxy/goproxy"
+	"golang.org/x/mod/module"
 )
+
+type metadataCacher struct {
+	cacher             goproxy.Cacher
+	logger             *slog.Logger
+	mutableMetadataTTL time.Duration
+	now                func() time.Time
+}
+
+func newMetadataCacher(cacher goproxy.Cacher, ttl time.Duration, logger *slog.Logger) goproxy.Cacher {
+	return &metadataCacher{
+		cacher:             cacher,
+		logger:             logger,
+		mutableMetadataTTL: ttl,
+		now:                time.Now,
+	}
+}
+
+func (mc *metadataCacher) Get(ctx context.Context, name string) (io.ReadCloser, error) {
+	if !isMutableMetadataTarget(name) {
+		return mc.cacher.Get(ctx, name)
+	}
+
+	if mc.mutableMetadataTTL <= 0 {
+		mc.logger.Debug("bypassing persistent cache for mutable metadata", "package", name)
+		cacheMisses.Inc()
+		return nil, fs.ErrNotExist
+	}
+
+	rc, err := mc.cacher.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+
+	modTime, ok := cacheModTime(rc)
+	if !ok {
+		rc.Close()
+		mc.logger.Warn("mutable metadata cache entry missing mod time; treating as stale", "package", name)
+		cacheMisses.Inc()
+		return nil, fs.ErrNotExist
+	}
+
+	if mc.now().After(modTime.Add(mc.mutableMetadataTTL)) {
+		rc.Close()
+		mc.logger.Debug("mutable metadata cache entry expired", "package", name, "age", mc.now().Sub(modTime), "ttl", mc.mutableMetadataTTL)
+		cacheMisses.Inc()
+		return nil, fs.ErrNotExist
+	}
+
+	return rc, nil
+}
+
+func (mc *metadataCacher) Put(ctx context.Context, name string, content io.ReadSeeker) error {
+	if isMutableMetadataTarget(name) && mc.mutableMetadataTTL <= 0 {
+		mc.logger.Debug("skipping persistent cache write for mutable metadata", "package", name)
+		return nil
+	}
+
+	return mc.cacher.Put(ctx, name, content)
+}
+
+type cacheObject struct {
+	io.ReadCloser
+	size         int64
+	lastModified time.Time
+	etag         string
+}
+
+func (co *cacheObject) Size() int64 {
+	return co.size
+}
+
+func (co *cacheObject) LastModified() time.Time {
+	return co.lastModified
+}
+
+func (co *cacheObject) ETag() string {
+	return co.etag
+}
+
+func cacheModTime(rc io.ReadCloser) (time.Time, bool) {
+	type lastModified interface{ LastModified() time.Time }
+	type modTime interface{ ModTime() time.Time }
+
+	if lm, ok := rc.(lastModified); ok {
+		if t := lm.LastModified(); !t.IsZero() {
+			return t, true
+		}
+	}
+	if mt, ok := rc.(modTime); ok {
+		if t := mt.ModTime(); !t.IsZero() {
+			return t, true
+		}
+	}
+
+	return time.Time{}, false
+}
+
+func isMutableMetadataTarget(name string) bool {
+	if strings.HasSuffix(name, "/@latest") || strings.HasSuffix(name, "/@v/list") {
+		return true
+	}
+	if !strings.HasSuffix(name, ".info") {
+		return false
+	}
+
+	modulePath, versionWithExt, ok := strings.Cut(name, "/@v/")
+	if !ok {
+		return false
+	}
+
+	version := strings.TrimSuffix(versionWithExt, ".info")
+	if version == versionWithExt {
+		return false
+	}
+
+	unescapedModulePath, err := module.UnescapePath(modulePath)
+	if err != nil {
+		return true
+	}
+	unescapedVersion, err := module.UnescapeVersion(version)
+	if err != nil {
+		return true
+	}
+
+	return !isCanonicalModuleVersion(unescapedModulePath, unescapedVersion)
+}
+
+func isCanonicalModuleVersion(modulePath, version string) bool {
+	if version == "" || version != module.CanonicalVersion(version) {
+		return false
+	}
+
+	_, pathMajor, ok := module.SplitPathVersion(modulePath)
+	if !ok {
+		return false
+	}
+
+	return module.CheckPathMajor(version, pathMajor) == nil
+}
 
 type s3Cacher struct {
 	client *s3.Client
@@ -67,7 +208,28 @@ func (s3c *s3Cacher) Get(ctx context.Context, name string) (io.ReadCloser, error
 
 	s3c.logger.Debug("cache hit", "cache_type", "s3", "package", name)
 	cacheHits.Inc()
-	return output.Body, nil
+
+	var lastModified time.Time
+	if output.LastModified != nil {
+		lastModified = *output.LastModified
+	}
+
+	var etag string
+	if output.ETag != nil {
+		etag = *output.ETag
+	}
+
+	var size int64
+	if output.ContentLength != nil {
+		size = *output.ContentLength
+	}
+
+	return &cacheObject{
+		ReadCloser:   output.Body,
+		size:         size,
+		lastModified: lastModified,
+		etag:         etag,
+	}, nil
 }
 
 func (s3c *s3Cacher) Put(ctx context.Context, name string, content io.ReadSeeker) error {

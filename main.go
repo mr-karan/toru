@@ -12,6 +12,8 @@ import (
 	"github.com/VictoriaMetrics/metrics"
 )
 
+var buildString = "dev"
+
 func main() {
 	// Initialize configuration
 	cfg, err := initConfig("config.toml", "TORU_")
@@ -88,5 +90,6 @@ func setupLogger(level string) *slog.Logger {
 		logLevel = slog.LevelInfo
 	}
 
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
+	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})
+	return slog.New(handler).With("service", "toru")
 }

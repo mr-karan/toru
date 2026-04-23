@@ -10,6 +10,7 @@ Toru extends the functionality by adding features such as caching (S3) and confi
 
 - Proxies Go module requests
 - Supports caching (S3 and disk)
+- Avoids persistently caching mutable module metadata like `/@v/list` and `@latest` by default
 - Configurable rewrite rules for module paths
 - Prometheus-compatible metrics endpoint
 
@@ -31,15 +32,15 @@ Consider the following rewrite rule in your `config.toml`:
 
 ```toml
 [[rewrite_rules]]
-vanity_path = "go.corp.com"
-target_path = "gitlab.corp.com"
+vanity_path = "go.example.com"
+target_path = "gitlab.example.com"
 ```
 
 With this rule in place:
 
-1. When a user tries to fetch a package with the import path `go.corp.com/awesome-pkg`, Toru intercepts this request.
-2. Instead of looking for the package at `go.corp.com/awesome-pkg`, Toru rewrites the request to `gitlab.corp.com/awesome-pkg`.
-3. Toru then fetches the package from the actual repository location at `gitlab.corp.com/awesome-pkg`.
+1. When a user tries to fetch a package with the import path `go.example.com/awesome-pkg`, Toru intercepts this request.
+2. Instead of looking for the package at `go.example.com/awesome-pkg`, Toru rewrites the request to `gitlab.example.com/awesome-pkg`.
+3. Toru then fetches the package from the actual repository location at `gitlab.example.com/awesome-pkg`.
 
 ### Why is this useful?
 
@@ -51,16 +52,29 @@ With this rule in place:
 
 Toru can be configured using a TOML file and environment variables. Refer to [config.sample.toml](./config.sample.toml) for reference.
 
+### Mutable metadata caching
+
+Toru treats `/@v/list`, `@latest`, and non-canonical `.info` lookups as mutable metadata.
+
+By default, persistent caching for that metadata is disabled in the sample config:
+
+```toml
+[cache]
+mutable_metadata_ttl = "0s"
+```
+
+Set `cache.mutable_metadata_ttl` to a non-zero duration if you want short-lived persistent caching for mutable metadata while still caching immutable `.mod` and `.zip` artifacts normally.
+
 ## Local Dev
 
-To build the project, use the provided Makefile:
+To build and run the project locally, use the provided `justfile`:
 
-```
-make build
-make run
+```bash
+just build
+just run
 ```
 
-This will build the binary and run it with the default configuration file (config.toml).
+This will build the binary and run it with the default configuration file (`config.toml`).
 
 ## Metrics
 
@@ -73,6 +87,10 @@ toru_upstream_fetch_duration_seconds: Upstream fetch duration
 toru_response_size_bytes: Response size
 toru_rewrite_rules_applied_total: Number of times rewrite rules were applied
 toru_errors_total: Total number of errors encountered
+toru_cache_hits_total: Total cache hits
+toru_cache_misses_total: Total cache misses
+toru_cache_writes_total: Total cache writes
+toru_cache_errors_total: Total cache errors
 ```
 
 
@@ -85,7 +103,7 @@ toru_errors_total: Total number of errors encountered
 Create or edit the `.netrc` file in your home directory:
 
 ```
-machine gitlab.corp.com
+machine gitlab.example.com
 login your-username
 password your-access-token
 ```
@@ -95,8 +113,8 @@ password your-access-token
 Add this to your `.gitconfig`
 
 ```
-[url "ssh://git@gitlab.corp.com"]
-	insteadOf = https://gitlab.corp.com
+[url "ssh://git@gitlab.example.com"]
+	insteadOf = https://gitlab.example.com
 ```
 
 ### Client-side Authentication
@@ -109,8 +127,8 @@ To enable authentication, you can specify the modules in your configuration file
 [auth.modules]
 name = "gitlab"
 type = "gitlab_access_token"
-options.root_url = "https://gitlab.corp.tech"
-options.protected_uri = "corp.tech"
+options.root_url = "https://gitlab.example.com"
+options.protected_uri = "go.example.com"
 ```
 
 #### GitLab Access Token
@@ -121,5 +139,5 @@ with the GitLab API to check if the user has access to the repository.
 To authenticate using the access token, use the following command:
 
 ```bash
-export GOPROXY=https://gitlab:<access_token>@toru.corp.io:9443
+export GOPROXY=https://gitlab:<access_token>@toru.example.com:9443
 ```

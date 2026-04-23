@@ -20,6 +20,10 @@ type Proxy struct {
 }
 
 func newProxy(cfg *Config, logger *slog.Logger) (*Proxy, error) {
+	proxyLogger := logger.With("component", "proxy")
+	fetcherLogger := logger.With("component", "fetcher")
+	cacheLogger := logger.With("component", "cache")
+
 	// Set up custom transport with timeouts
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{
@@ -27,7 +31,7 @@ func newProxy(cfg *Config, logger *slog.Logger) (*Proxy, error) {
 		KeepAlive: 30 * time.Second,
 	}).DialContext
 
-	fetcher, err := newFetcher(cfg, logger)
+	fetcher, err := newFetcher(cfg, fetcherLogger, transport)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create fetcher: %w", err)
 	}
@@ -36,20 +40,22 @@ func newProxy(cfg *Config, logger *slog.Logger) (*Proxy, error) {
 	if cfg.Cache.Enabled {
 		switch cfg.Cache.Type {
 		case "s3":
-			cacher, err = newS3Cacher(cfg, logger)
+			cacher, err = newS3Cacher(cfg, cacheLogger.With("cache_type", "s3"))
 		case "disk":
-			cacher = newDiskCacher(cfg.Cache.Disk.Path, logger)
+			cacher = newDiskCacher(cfg.Cache.Disk.Path, cacheLogger.With("cache_type", "disk"))
 		default:
 			return nil, fmt.Errorf("unsupported cache type: %s", cfg.Cache.Type)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to create cacher: %w", err)
 		}
+		cacher = newMetadataCacher(cacher, cfg.Cache.MutableMetadataTTL, cacheLogger)
 	}
 
 	client := &goproxy.Goproxy{
 		Fetcher:   fetcher,
 		Cacher:    cacher,
+		Logger:    logger.With("component", "goproxy"),
 		Transport: transport,
 	}
 
@@ -82,7 +88,7 @@ func newProxy(cfg *Config, logger *slog.Logger) (*Proxy, error) {
 	return &Proxy{
 		client:         client,
 		cfg:            cfg,
-		logger:         logger,
+		logger:         proxyLogger,
 		server:         server,
 		authenticators: authenticators,
 	}, nil
