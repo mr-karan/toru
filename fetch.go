@@ -87,6 +87,19 @@ func (f *fetcher) rewrite(path string) string {
 	return path
 }
 
+// withFetchTimeout bounds the upstream fetch/build phase to Server.FetchTimeout.
+// It is applied only around upstream operations (Query/List/Download), never the
+// whole request: the returned readers from Download are os.File-backed handles
+// over the completed module cache, so releasing the deadline once the upstream
+// call returns is safe and keeps the deadline off the post-200 client copy.
+// A FetchTimeout of 0 disables the bound (matches the config's documented "0").
+func (f *fetcher) withFetchTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if f.cfg.Server.FetchTimeout > 0 {
+		return context.WithTimeout(ctx, f.cfg.Server.FetchTimeout)
+	}
+	return ctx, func() {}
+}
+
 func (f *fetcher) Query(ctx context.Context, path, query string) (version string, t time.Time, err error) {
 	startTime := time.Now()
 	defer func() {
@@ -95,6 +108,9 @@ func (f *fetcher) Query(ctx context.Context, path, query string) (version string
 			errorsTotal.Inc()
 		}
 	}()
+
+	ctx, cancel := f.withFetchTimeout(ctx)
+	defer cancel()
 
 	rewrittenPath := f.rewrite(path)
 	if rewrittenPath != path {
@@ -116,6 +132,9 @@ func (f *fetcher) List(ctx context.Context, path string) (versions []string, err
 			errorsTotal.Inc()
 		}
 	}()
+
+	ctx, cancel := f.withFetchTimeout(ctx)
+	defer cancel()
 
 	rewrittenPath := f.rewrite(path)
 	if rewrittenPath != path {
@@ -145,6 +164,15 @@ func (f *fetcher) Download(ctx context.Context, path, version string) (info, mod
 			errorsTotal.Inc()
 		}
 	}()
+
+	// Bound only the build phase (upstream download + in-memory zip rewrite).
+	// The returned readers are materialized over the module cache / an in-memory
+	// buffer, so cancelling once this function returns does not affect the
+	// subsequent client copy. This keeps a slow cold build from being aborted
+	// mid-stream (HTTP/2 INTERNAL_ERROR); instead it errors before headers and
+	// goproxy returns a retryable response.
+	ctx, cancel := f.withFetchTimeout(ctx)
+	defer cancel()
 
 	rewrittenPath := f.rewrite(path)
 	if rewrittenPath != path {
