@@ -61,10 +61,13 @@ func newProxy(cfg *Config, logger *slog.Logger) (*Proxy, error) {
 
 	handler := http.Handler(client)
 
-	// Add fetch timeout middleware if configured
-	if cfg.Server.FetchTimeout > 0 {
-		handler = createTimeoutMiddleware(handler, cfg.Server.FetchTimeout)
-	}
+	// NOTE: FetchTimeout is intentionally NOT applied as whole-handler middleware.
+	// A request-wide deadline also covers the post-200 client copy, so a slow
+	// cold-cache build that overran the deadline was aborted mid-stream and
+	// surfaced to the `go` client as an HTTP/2 INTERNAL_ERROR (stream reset)
+	// instead of a retryable error. The timeout is now scoped to the upstream
+	// fetch/build phase inside the fetcher (see fetcher.withFetchTimeout), which
+	// completes before any response headers are written.
 
 	server := &http.Server{
 		Addr:    cfg.Server.Address,
@@ -94,13 +97,6 @@ func newProxy(cfg *Config, logger *slog.Logger) (*Proxy, error) {
 	}, nil
 }
 
-func createTimeoutMiddleware(next http.Handler, timeout time.Duration) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), timeout)
-		defer cancel()
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestsTotal.Inc()
