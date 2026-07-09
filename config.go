@@ -115,6 +115,9 @@ func initConfig(cfgDefault, envPrefix string) (*Config, error) {
 		return nil, err
 	}
 	cfg.normalize()
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
@@ -145,4 +148,16 @@ func (c *Config) normalize() {
 	if c.Protocols.NPM.Upstream == "" {
 		c.Protocols.NPM.Upstream = "https://registry.npmjs.org"
 	}
+}
+
+func (c *Config) validate() error {
+	for _, listener := range c.Listeners {
+		if len(listener.Protocols) == 0 {
+			return fmt.Errorf("listener %q must declare at least one protocol", listener.Name)
+		}
+		if len(listener.Protocols) > 1 {
+			return fmt.Errorf("listener %q declares multiple protocols but host dispatch is not implemented yet", listener.Name)
+		}
+	}
+	return nil
 }

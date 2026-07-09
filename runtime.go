@@ -26,20 +26,22 @@ func buildListeners(cfg *Config, logger *slog.Logger) ([]runtimeServer, error) {
 
 	servers := make([]runtimeServer, 0, len(cfg.Listeners))
 	for _, listener := range cfg.Listeners {
+		if len(listener.Protocols) != 1 {
+			return nil, fmt.Errorf("listener %q must declare exactly one protocol until host dispatch is implemented", listener.Name)
+		}
+
 		mux := http.NewServeMux()
 		mux.HandleFunc("/metrics", func(w http.ResponseWriter, req *http.Request) {
 			metrics.WritePrometheus(w, true)
 		})
 
-		for _, protocol := range listener.Protocols {
-			switch protocol {
-			case "go":
-				mux.Handle("/", goProxy)
-			case "npm":
-				mux.Handle("/", newNPMHandler(cfg, logger))
-			default:
-				return nil, fmt.Errorf("unsupported protocol: %s", protocol)
-			}
+		switch listener.Protocols[0] {
+		case "go":
+			mux.Handle("/", goProxy)
+		case "npm":
+			mux.Handle("/", newNPMHandler(cfg, logger))
+		default:
+			return nil, fmt.Errorf("unsupported protocol: %s", listener.Protocols[0])
 		}
 
 		servers = append(servers, runtimeServer{

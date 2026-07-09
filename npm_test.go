@@ -61,7 +61,7 @@ func TestNPMScopedMetadataRequestReturnsRewrittenTarballs(t *testing.T) {
 			if resp.StatusCode != http.StatusOK {
 				t.Fatalf("status=%d body=%q, want 200", resp.StatusCode, body)
 			}
-			want := "http://127.0.0.1:" + strconv.Itoa(npmPort) + "/@toru/fixture-scoped/-/fixture-scoped-1.0.0.tgz"
+			want := "http://127.0.0.1:" + strconv.Itoa(npmPort) + "/%40toru%2Ffixture-scoped/-/fixture-scoped-1.0.0.tgz"
 			if !strings.Contains(body, want) {
 				t.Fatalf("rewritten scoped tarball URL missing: want substring %q in %q", want, body)
 			}

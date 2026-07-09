@@ -108,7 +108,7 @@ func newCountingFakeNPMRegistry(t *testing.T, tarballHits *atomic.Int32) *httpte
 			}
 		}`)
 	})
-	mux.HandleFunc("/@toru/fixture-scoped", func(w http.ResponseWriter, r *http.Request) {
+	scopedMetadataHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{
 			"name":"@toru/fixture-scoped",
@@ -124,7 +124,9 @@ func newCountingFakeNPMRegistry(t *testing.T, tarballHits *atomic.Int32) *httpte
 				}
 			}
 		}`)
-	})
+	}
+	mux.HandleFunc("/@toru/fixture-scoped", scopedMetadataHandler)
+	mux.HandleFunc("/%40toru%2Ffixture-scoped", scopedMetadataHandler)
 	mux.HandleFunc("/toru-fixture-pkg/-/toru-fixture-pkg-1.0.0.tgz", func(w http.ResponseWriter, r *http.Request) {
 		if tarballHits != nil {
 			tarballHits.Add(1)
@@ -132,13 +134,15 @@ func newCountingFakeNPMRegistry(t *testing.T, tarballHits *atomic.Int32) *httpte
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = io.WriteString(w, "fake-tgz-unscoped")
 	})
-	mux.HandleFunc("/@toru/fixture-scoped/-/fixture-scoped-1.0.0.tgz", func(w http.ResponseWriter, r *http.Request) {
+	scopedTarballHandler := func(w http.ResponseWriter, r *http.Request) {
 		if tarballHits != nil {
 			tarballHits.Add(1)
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = io.WriteString(w, "fake-tgz-scoped")
-	})
+	}
+	mux.HandleFunc("/@toru/fixture-scoped/-/fixture-scoped-1.0.0.tgz", scopedTarballHandler)
+	mux.HandleFunc("/%40toru%2Ffixture-scoped/-/fixture-scoped-1.0.0.tgz", scopedTarballHandler)
 	return httptest.NewServer(mux)
 }
 

@@ -4,21 +4,31 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"log/slog"
+	"time"
 )
 
 type npmHandler struct {
-	cfg    *Config
-	logger *slog.Logger
+	cfg        *Config
+	logger     *slog.Logger
+	httpClient *http.Client
 }
 
 func newNPMHandler(cfg *Config, logger *slog.Logger) http.Handler {
-	return &npmHandler{cfg: cfg, logger: logger.With("component", "npm")}
+	timeout := cfg.Server.FetchTimeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	return &npmHandler{
+		cfg:        cfg,
+		logger:     logger.With("component", "npm"),
+		httpClient: &http.Client{Timeout: timeout},
+	}
 }
 
 func (h *npmHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -39,18 +49,13 @@ func (h *npmHandler) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid package path", http.StatusBadRequest)
 		return
 	}
-	upstreamURL := strings.TrimSuffix(h.cfg.Protocols.NPM.Upstream, "/") + "/" + pkg
-	resp, err := http.Get(upstreamURL)
+	upstreamURL := strings.TrimSuffix(h.cfg.Protocols.NPM.Upstream, "/") + "/" + encodeNPMPackagePath(pkg)
+	resp, body, err := h.doUpstreamGet(r, upstreamURL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
 	if resp.StatusCode != http.StatusOK {
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(body)
@@ -77,36 +82,63 @@ func (h *npmHandler) handleTarball(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(body)
 		return
 	}
-	upstreamURL := strings.TrimSuffix(h.cfg.Protocols.NPM.Upstream, "/") + r.URL.Path
-	resp, err := http.Get(upstreamURL)
+
+	upstreamURL := strings.TrimSuffix(h.cfg.Protocols.NPM.Upstream, "/") + "/" + encodeNPMPackagePath(pkg) + "/-/" + filename
+	resp, body, err := h.doUpstreamGet(r, upstreamURL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
 	if resp.StatusCode != http.StatusOK {
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(body)
 		return
 	}
-	_ = os.MkdirAll(filepath.Dir(cachePath), 0o755)
-	_ = os.WriteFile(cachePath, body, 0o644)
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		h.logger.Error("failed to create npm cache directory", "path", filepath.Dir(cachePath), "error", err)
+		http.Error(w, "failed to create npm cache directory", http.StatusInternalServerError)
+		return
+	}
+	if err := os.WriteFile(cachePath, body, 0o644); err != nil {
+		h.logger.Error("failed to write npm cache file", "path", cachePath, "error", err)
+		http.Error(w, "failed to write npm cache file", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	_, _ = w.Write(body)
 }
 
+func (h *npmHandler) doUpstreamGet(r *http.Request, upstreamURL string) (*http.Response, []byte, error) {
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	resp, err := h.httpClient.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		resp.Body.Close()
+		return nil, nil, err
+	}
+	resp.Body = io.NopCloser(strings.NewReader(string(body)))
+	return resp, body, nil
+}
+
 func decodeNPMPackagePath(path string) string {
 	path = strings.TrimPrefix(path, "/")
-	path = strings.ReplaceAll(path, "%2F", "/")
-	path = strings.ReplaceAll(path, "%2f", "/")
-	path = strings.ReplaceAll(path, "%40", "@")
-	path = strings.ReplaceAll(path, "%40", "@")
-	return path
+	decoded, err := url.PathUnescape(path)
+	if err != nil {
+		return path
+	}
+	return decoded
+}
+
+func encodeNPMPackagePath(pkg string) string {
+	encoded := url.PathEscape(pkg)
+	return strings.ReplaceAll(encoded, "@", "%40")
 }
 
 func parseNPMTarballPath(path string) (string, string) {
@@ -124,6 +156,7 @@ func rewriteNPMMetadataTarballs(body []byte, baseURL, packageName string) ([]byt
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, err
 	}
+	encodedPackageName := encodeNPMPackagePath(packageName)
 	versions, _ := doc["versions"].(map[string]any)
 	for _, value := range versions {
 		vm, ok := value.(map[string]any)
@@ -140,7 +173,7 @@ func rewriteNPMMetadataTarballs(body []byte, baseURL, packageName string) ([]byt
 		}
 		parts := strings.Split(tarball, "/")
 		filename := parts[len(parts)-1]
-		dist["tarball"] = fmt.Sprintf("%s/%s/-/%s", strings.TrimSuffix(baseURL, "/"), packageName, filename)
+		dist["tarball"] = fmt.Sprintf("%s/%s/-/%s", strings.TrimSuffix(baseURL, "/"), encodedPackageName, filename)
 	}
 	return json.Marshal(doc)
 }

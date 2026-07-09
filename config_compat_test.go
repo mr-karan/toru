@@ -132,6 +132,34 @@ base_url = "https://npm-toru.example.com"
 	}
 }
 
+func TestMultiProtocolListenerRejectedUntilHostDispatchExists(t *testing.T) {
+	cfgText := `[server]
+address = ":9999"
+log_level = "info"
+
+[[listeners]]
+name = "mixed"
+address = ":8080"
+protocols = ["go", "npm"]
+hosts = ["toru.example.com", "npm-toru.example.com"]
+`
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(path, []byte(cfgText), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+	os.Args = []string{"toru", "--config", path}
+
+	_, err := initConfig(path, "TORU_")
+	if err == nil {
+		t.Fatalf("expected multi-protocol same-listener config to be rejected until host dispatch exists")
+	}
+}
+
 func loadConfigFromText(t *testing.T, content string) *Config {
 	t.Helper()
 	tmp := t.TempDir()
