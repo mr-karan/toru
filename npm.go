@@ -49,6 +49,18 @@ func (h *npmHandler) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid package path", http.StatusBadRequest)
 		return
 	}
+
+	if body, ok := h.readFreshMetadataCache(pkg); ok {
+		rewritten, err := rewriteNPMMetadataTarballs(body, h.cfg.Protocols.NPM.BaseURL, pkg)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(rewritten)
+		return
+	}
+
 	upstreamURL := strings.TrimSuffix(h.cfg.Protocols.NPM.Upstream, "/") + "/" + encodeNPMPackagePath(pkg)
 	resp, body, err := h.doUpstreamGet(r, upstreamURL)
 	if err != nil {
@@ -61,6 +73,7 @@ func (h *npmHandler) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(body)
 		return
 	}
+	_ = h.writeMetadataCache(pkg, body)
 	rewritten, err := rewriteNPMMetadataTarballs(body, h.cfg.Protocols.NPM.BaseURL, pkg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -155,6 +168,49 @@ func parseNPMTarballPath(path string) (string, string) {
 	}
 	pkg := decodeNPMPackagePath(trimmed[:idx])
 	return pkg, trimmed[idx+3:]
+}
+
+func (h *npmHandler) metadataCacheEnabled() bool {
+	return h.cfg.Cache.Enabled && h.cfg.Cache.Type == "disk" && h.cfg.Cache.Disk.Path != "" && h.cfg.Protocols.NPM.MetadataTTL > 0
+}
+
+func (h *npmHandler) metadataCachePath(pkg string) string {
+	return filepath.Join(h.cfg.Cache.Disk.Path, "npm-meta", npmCachePackageKey(pkg)+".json")
+}
+
+func (h *npmHandler) readFreshMetadataCache(pkg string) ([]byte, bool) {
+	if !h.metadataCacheEnabled() {
+		return nil, false
+	}
+	path := h.metadataCachePath(pkg)
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, false
+	}
+	if time.Since(info.ModTime()) > h.cfg.Protocols.NPM.MetadataTTL {
+		return nil, false
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	return body, true
+}
+
+func (h *npmHandler) writeMetadataCache(pkg string, body []byte) error {
+	if !h.metadataCacheEnabled() {
+		return nil
+	}
+	path := h.metadataCachePath(pkg)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		h.logger.Error("failed to create npm metadata cache directory; serving uncached body", "path", filepath.Dir(path), "error", err)
+		return err
+	}
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		h.logger.Error("failed to write npm metadata cache file; serving uncached body", "path", path, "error", err)
+		return err
+	}
+	return nil
 }
 
 func rewriteNPMMetadataTarballs(body []byte, baseURL, packageName string) ([]byte, error) {

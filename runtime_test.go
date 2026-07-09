@@ -85,13 +85,21 @@ base_url = "http://127.0.0.1:%d"
 
 func newFakeNPMRegistry(t *testing.T) *httptest.Server {
 	t.Helper()
-	return newCountingFakeNPMRegistry(t, nil)
+	return newCountingFakeNPMRegistryWithCounters(t, nil, nil, nil, nil)
 }
 
 func newCountingFakeNPMRegistry(t *testing.T, tarballHits *atomic.Int32) *httptest.Server {
 	t.Helper()
+	return newCountingFakeNPMRegistryWithCounters(t, nil, nil, tarballHits, tarballHits)
+}
+
+func newCountingFakeNPMRegistryWithCounters(t *testing.T, unscopedMetadataHits, scopedMetadataHits, unscopedTarballHits, scopedTarballHits *atomic.Int32) *httptest.Server {
+	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/toru-fixture-pkg", func(w http.ResponseWriter, r *http.Request) {
+		if unscopedMetadataHits != nil {
+			unscopedMetadataHits.Add(1)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{
 			"name":"toru-fixture-pkg",
@@ -109,6 +117,9 @@ func newCountingFakeNPMRegistry(t *testing.T, tarballHits *atomic.Int32) *httpte
 		}`)
 	})
 	scopedMetadataHandler := func(w http.ResponseWriter, r *http.Request) {
+		if scopedMetadataHits != nil {
+			scopedMetadataHits.Add(1)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{
 			"name":"@toru/fixture-scoped",
@@ -128,15 +139,15 @@ func newCountingFakeNPMRegistry(t *testing.T, tarballHits *atomic.Int32) *httpte
 	mux.HandleFunc("/@toru/fixture-scoped", scopedMetadataHandler)
 	mux.HandleFunc("/%40toru%2Ffixture-scoped", scopedMetadataHandler)
 	mux.HandleFunc("/toru-fixture-pkg/-/toru-fixture-pkg-1.0.0.tgz", func(w http.ResponseWriter, r *http.Request) {
-		if tarballHits != nil {
-			tarballHits.Add(1)
+		if unscopedTarballHits != nil {
+			unscopedTarballHits.Add(1)
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = io.WriteString(w, "fake-tgz-unscoped")
 	})
 	scopedTarballHandler := func(w http.ResponseWriter, r *http.Request) {
-		if tarballHits != nil {
-			tarballHits.Add(1)
+		if scopedTarballHits != nil {
+			scopedTarballHits.Add(1)
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = io.WriteString(w, "fake-tgz-scoped")
