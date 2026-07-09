@@ -22,6 +22,9 @@ type Config struct {
 		FetchTimeout time.Duration `koanf:"fetch_timeout"`
 	} `koanf:"server"`
 
+	Listeners []ListenerConfig `koanf:"listeners"`
+	Protocols ProtocolsConfig  `koanf:"protocols"`
+
 	Cache struct {
 		Enabled            bool          `koanf:"enabled"`
 		Type               string        `koanf:"type"`
@@ -43,61 +46,64 @@ type Config struct {
 	} `koanf:"rewrite_rules"`
 
 	Auth struct {
-		// Enabled is a flag to enable or disable the auth module.
-		Enabled bool `koanf:"enabled"`
-
-		// Modules is a list of auth modules.
+		Enabled bool         `koanf:"enabled"`
 		Modules []AuthModule `koanf:"modules"`
 	} `koanf:"auth"`
 }
 
+type ListenerConfig struct {
+	Name      string   `koanf:"name"`
+	Address   string   `koanf:"address"`
+	Protocols []string `koanf:"protocols"`
+	Hosts     []string `koanf:"hosts"`
+}
+
+type ProtocolsConfig struct {
+	Go  GoProtocolConfig  `koanf:"go"`
+	NPM NPMProtocolConfig `koanf:"npm"`
+}
+
+type GoProtocolConfig struct {
+	Enabled      bool          `koanf:"enabled"`
+	FetchTimeout time.Duration `koanf:"fetch_timeout"`
+}
+
+type NPMProtocolConfig struct {
+	Enabled     bool          `koanf:"enabled"`
+	Upstream    string        `koanf:"upstream"`
+	MetadataTTL time.Duration `koanf:"metadata_ttl"`
+	BaseURL     string        `koanf:"base_url"`
+}
+
 // AuthModule represents an auth module configuration.
-// Auth modules are used to authenticate users.
-// The auth module implementation is determined by the Type field.
 type AuthModule struct {
-	// Name of the auth module. This is used to identify the module via
-	// the username in basic auth.
-	Name string `koanf:"name"`
-
-	// Type of the auth module. This is used to identify the module
-	// implementation.
-	Type string `koanf:"type"`
-
-	// Options is a map of options specific to the auth module. These
-	// are used to configure the auth module.
+	Name    string                 `koanf:"name"`
+	Type    string                 `koanf:"type"`
 	Options map[string]interface{} `koanf:"options"`
 }
 
-// initConfig loads config and returns a Config instance.
 func initConfig(cfgDefault, envPrefix string) (*Config, error) {
 	var (
 		ko = koanf.New(".")
 		f  = flag.NewFlagSet("app", flag.ContinueOnError)
 	)
 
-	// Configure Flags.
 	f.Usage = func() {
 		fmt.Println(f.FlagUsages())
 		os.Exit(0)
 	}
-
-	// Register flags.
 	f.String("config", cfgDefault, "Path to a config file to load.")
 
-	// Parse and Load Flags.
 	err := f.Parse(os.Args[1:])
 	if err != nil {
 		return nil, err
 	}
-
 	if err := ko.Load(posflag.Provider(f, ".", ko), nil); err != nil {
 		return nil, err
 	}
-
 	if err := ko.Load(file.Provider(ko.String("config")), toml.Parser()); err != nil {
 		return nil, err
 	}
-
 	if err := ko.Load(env.Provider(envPrefix, ".", func(s string) string {
 		return strings.Replace(strings.ToLower(strings.TrimPrefix(s, envPrefix)), "__", ".", -1)
 	}), nil); err != nil {
@@ -108,6 +114,35 @@ func initConfig(cfgDefault, envPrefix string) (*Config, error) {
 	if err := ko.Unmarshal("", cfg); err != nil {
 		return nil, err
 	}
-
+	cfg.normalize()
 	return cfg, nil
+}
+
+func (c *Config) normalize() {
+	if c.Protocols.Go.FetchTimeout == 0 {
+		c.Protocols.Go.FetchTimeout = c.Server.FetchTimeout
+	}
+	if len(c.Listeners) == 0 {
+		c.Protocols.Go.Enabled = true
+		c.Listeners = []ListenerConfig{{
+			Name:      "go",
+			Address:   c.Server.Address,
+			Protocols: []string{"go"},
+		}}
+	}
+	if !c.Protocols.Go.Enabled && !c.Protocols.NPM.Enabled {
+		for _, l := range c.Listeners {
+			for _, p := range l.Protocols {
+				switch p {
+				case "go":
+					c.Protocols.Go.Enabled = true
+				case "npm":
+					c.Protocols.NPM.Enabled = true
+				}
+			}
+		}
+	}
+	if c.Protocols.NPM.Upstream == "" {
+		c.Protocols.NPM.Upstream = "https://registry.npmjs.org"
+	}
 }
