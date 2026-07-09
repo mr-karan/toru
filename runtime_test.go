@@ -142,7 +142,6 @@ func newCountingFakeNPMRegistry(t *testing.T, tarballHits *atomic.Int32) *httpte
 		_, _ = io.WriteString(w, "fake-tgz-scoped")
 	}
 	mux.HandleFunc("/@toru/fixture-scoped/-/fixture-scoped-1.0.0.tgz", scopedTarballHandler)
-	mux.HandleFunc("/%40toru%2Ffixture-scoped/-/fixture-scoped-1.0.0.tgz", scopedTarballHandler)
 	return httptest.NewServer(mux)
 }
 

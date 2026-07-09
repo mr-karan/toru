@@ -76,14 +76,14 @@ func (h *npmHandler) handleTarball(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid tarball path", http.StatusBadRequest)
 		return
 	}
-	cachePath := filepath.Join(h.cfg.Cache.Disk.Path, "npm", strings.ReplaceAll(pkg, "/", "__"), filename)
+	cachePath := filepath.Join(h.cfg.Cache.Disk.Path, "npm", npmCachePackageKey(pkg), filename)
 	if body, err := os.ReadFile(cachePath); err == nil {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = w.Write(body)
 		return
 	}
 
-	upstreamURL := strings.TrimSuffix(h.cfg.Protocols.NPM.Upstream, "/") + "/" + encodeNPMPackagePath(pkg) + "/-/" + filename
+	upstreamURL := strings.TrimSuffix(h.cfg.Protocols.NPM.Upstream, "/") + "/" + pkg + "/-/" + filename
 	resp, body, err := h.doUpstreamGet(r, upstreamURL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -96,13 +96,15 @@ func (h *npmHandler) handleTarball(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
-		h.logger.Error("failed to create npm cache directory", "path", filepath.Dir(cachePath), "error", err)
-		http.Error(w, "failed to create npm cache directory", http.StatusInternalServerError)
+		h.logger.Error("failed to create npm cache directory; serving uncached body", "path", filepath.Dir(cachePath), "error", err)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(body)
 		return
 	}
 	if err := os.WriteFile(cachePath, body, 0o644); err != nil {
-		h.logger.Error("failed to write npm cache file", "path", cachePath, "error", err)
-		http.Error(w, "failed to write npm cache file", http.StatusInternalServerError)
+		h.logger.Error("failed to write npm cache file; serving uncached body", "path", cachePath, "error", err)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(body)
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -139,6 +141,10 @@ func decodeNPMPackagePath(path string) string {
 func encodeNPMPackagePath(pkg string) string {
 	encoded := url.PathEscape(pkg)
 	return strings.ReplaceAll(encoded, "@", "%40")
+}
+
+func npmCachePackageKey(pkg string) string {
+	return encodeNPMPackagePath(pkg)
 }
 
 func parseNPMTarballPath(path string) (string, string) {

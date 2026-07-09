@@ -69,6 +69,14 @@ func TestNPMScopedMetadataRequestReturnsRewrittenTarballs(t *testing.T) {
 	}
 }
 
+func TestNPMCachePackageKeyAvoidsScopedCollisions(t *testing.T) {
+	keyA := npmCachePackageKey("@a/b__c")
+	keyB := npmCachePackageKey("@a__b/c")
+	if keyA == keyB {
+		t.Fatalf("cache keys must not collide: %q == %q", keyA, keyB)
+	}
+}
+
 func TestUnsupportedNPMMutationEndpointRejected(t *testing.T) {
 	goPort := freePort(t)
 	npmPort := freePort(t)
