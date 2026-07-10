@@ -21,6 +21,65 @@ import (
 // separate Go and npm listeners, metrics still available, and npm traffic not
 // handled by the legacy Go-only path.
 
+func TestSingleListenerHostDispatchRoutesByHost(t *testing.T) {
+	port := freePort(t)
+	upstream := newFakeNPMRegistry(t)
+	cfgText := fmt.Sprintf(`[server]
+address = ":%d"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "shared"
+address = ":%d"
+protocols = ["go", "npm"]
+hosts = ["toru.example.com", "npm-toru.example.com"]
+
+[cache]
+enabled = true
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = %q
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = %q
+metadata_ttl = "5m"
+base_url = "http://npm-toru.example.com"
+`, port, port, filepath.Join(t.TempDir(), "cache"), upstream.URL)
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+
+	waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", port), 10*time.Second)
+
+	npmResp, npmBody, err := getURLWithHost(fmt.Sprintf("http://127.0.0.1:%d/toru-fixture-pkg", port), "npm-toru.example.com")
+	if err != nil {
+		t.Fatalf("npm host request: %v", err)
+	}
+	defer npmResp.Body.Close()
+	if npmResp.StatusCode != http.StatusOK {
+		t.Fatalf("npm host request status = %d body=%q, want 200", npmResp.StatusCode, npmBody)
+	}
+	if !strings.Contains(npmBody, "npm-toru.example.com/toru-fixture-pkg/-/toru-fixture-pkg-1.0.0.tgz") {
+		t.Fatalf("npm host response must be served by npm handler, body=%q", npmBody)
+	}
+
+	goResp, goBody, err := getURLWithHost(fmt.Sprintf("http://127.0.0.1:%d/toru-fixture-pkg", port), "toru.example.com")
+	if err != nil {
+		t.Fatalf("go host request: %v", err)
+	}
+	defer goResp.Body.Close()
+	if goResp.StatusCode == http.StatusOK {
+		t.Fatalf("go host request unexpectedly returned 200 body=%q; expected non-npm dispatch", goBody)
+	}
+}
+
 func TestMixedModeRuntimeExposesMetricsAndNPMListener(t *testing.T) {
 	goPort := freePort(t)
 	npmPort := freePort(t)
@@ -381,6 +440,25 @@ func waitForHTTP200(t *testing.T, rawURL string, timeout time.Duration) {
 
 func getURL(rawURL string) (*http.Response, string, error) {
 	resp, err := http.Get(rawURL)
+	if err != nil {
+		return nil, "", err
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		_ = resp.Body.Close()
+		return nil, "", readErr
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	return resp, string(body), nil
+}
+
+func getURLWithHost(rawURL, host string) (*http.Response, string, error) {
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Host = host
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, "", err
 	}

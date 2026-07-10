@@ -10,7 +10,13 @@ fetch_timeout = "30s"
 
 # Explicit multi-listener configuration.
 # Omit [[listeners]] to keep legacy go-only behavior on [server].address.
-# Current limitation: each listener must declare exactly one protocol.
+# You can also configure one shared listener with protocols + hosts aligned by index,
+# for example:
+# [[listeners]]
+# name = "shared"
+# address = ":443"
+# protocols = ["go", "npm"]
+# hosts = ["go.example.com", "npm.example.com"]
 [[listeners]]
 name = "go"
 address = ":8888"
@@ -45,7 +51,7 @@ fetch_timeout = "30s"
 enabled = true
 upstream = "https://registry.npmjs.org"
 metadata_ttl = "5m" # npm metadata cache is active only for disk cache + metadata_ttl > 0
-base_url = "http://127.0.0.1:8889"
+base_url = "http://127.0.0.1:8889" # for shared host-dispatch listeners, set this to the npm host origin
 
 # Optional npm protected scope auth.
 # Requests under @toru/* require either:

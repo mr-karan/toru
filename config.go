@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -75,7 +76,6 @@ type NPMProtocolConfig struct {
 	BaseURL         string               `koanf:"base_url"`
 	ProtectedScopes []ProtectedScopeRule `koanf:"protected_scopes"`
 }
-
 
 type ProtectedScopeRule struct {
 	Scope      string `koanf:"scope"`
@@ -162,9 +162,39 @@ func (c *Config) validate() error {
 		if len(listener.Protocols) == 0 {
 			return fmt.Errorf("listener %q must declare at least one protocol", listener.Name)
 		}
-		if len(listener.Protocols) > 1 {
-			return fmt.Errorf("listener %q declares multiple protocols but host dispatch is not implemented yet", listener.Name)
+		if len(listener.Protocols) == 1 {
+			continue
+		}
+		if len(listener.Hosts) != len(listener.Protocols) {
+			return fmt.Errorf("listener %q must declare one host per protocol for host dispatch", listener.Name)
+		}
+		seenProtocols := map[string]struct{}{}
+		seenHosts := map[string]struct{}{}
+		for i, protocol := range listener.Protocols {
+			if _, ok := seenProtocols[protocol]; ok {
+				return fmt.Errorf("listener %q declares duplicate protocol %q in host dispatch config", listener.Name, protocol)
+			}
+			seenProtocols[protocol] = struct{}{}
+			host := normalizeListenerHost(listener.Hosts[i])
+			if host == "" {
+				return fmt.Errorf("listener %q has empty host for protocol %q", listener.Name, protocol)
+			}
+			if _, ok := seenHosts[host]; ok {
+				return fmt.Errorf("listener %q declares duplicate host %q", listener.Name, host)
+			}
+			seenHosts[host] = struct{}{}
 		}
 	}
 	return nil
+}
+
+func normalizeListenerHost(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	if host == "" {
+		return ""
+	}
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		return parsedHost
+	}
+	return host
 }

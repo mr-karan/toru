@@ -30,23 +30,36 @@ func buildListeners(cfg *Config, logger *slog.Logger) ([]runtimeServer, error) {
 	}
 
 	servers := make([]runtimeServer, 0, len(cfg.Listeners))
+	npmHandler := newNPMHandler(cfg, logger, authenticators)
 	for _, listener := range cfg.Listeners {
-		if len(listener.Protocols) != 1 {
-			return nil, fmt.Errorf("listener %q must declare exactly one protocol until host dispatch is implemented", listener.Name)
-		}
-
 		mux := http.NewServeMux()
 		mux.HandleFunc("/metrics", func(w http.ResponseWriter, req *http.Request) {
 			metrics.WritePrometheus(w, true)
 		})
 
-		switch listener.Protocols[0] {
-		case "go":
-			mux.Handle("/", goProxy)
-		case "npm":
-			mux.Handle("/", newNPMHandler(cfg, logger, authenticators))
-		default:
-			return nil, fmt.Errorf("unsupported protocol: %s", listener.Protocols[0])
+		if len(listener.Protocols) == 1 {
+			handler, err := protocolHandler(listener.Protocols[0], goProxy, npmHandler)
+			if err != nil {
+				return nil, err
+			}
+			mux.Handle("/", handler)
+		} else {
+			routes := make(map[string]http.Handler, len(listener.Protocols))
+			for i, protocol := range listener.Protocols {
+				handler, err := protocolHandler(protocol, goProxy, npmHandler)
+				if err != nil {
+					return nil, err
+				}
+				routes[normalizeListenerHost(listener.Hosts[i])] = handler
+			}
+			mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				handler, ok := routes[normalizeListenerHost(req.Host)]
+				if !ok {
+					http.Error(w, "unknown host for listener", http.StatusMisdirectedRequest)
+					return
+				}
+				handler.ServeHTTP(w, req)
+			}))
 		}
 
 		servers = append(servers, runtimeServer{
@@ -59,6 +72,17 @@ func buildListeners(cfg *Config, logger *slog.Logger) ([]runtimeServer, error) {
 	}
 
 	return servers, nil
+}
+
+func protocolHandler(protocol string, goProxy, npmHandler http.Handler) (http.Handler, error) {
+	switch protocol {
+	case "go":
+		return goProxy, nil
+	case "npm":
+		return npmHandler, nil
+	default:
+		return nil, fmt.Errorf("unsupported protocol: %s", protocol)
+	}
 }
 
 func run(cfg *Config, logger *slog.Logger) error {

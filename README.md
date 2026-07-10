@@ -28,9 +28,6 @@ Implemented today:
 
 Not implemented yet:
 - npm publish APIs
-- host-based multi-protocol dispatch on a single listener
-
-For now, if you want both protocols in one process, run separate listeners, one protocol per listener.
 
 ## Running with Docker
 
@@ -94,6 +91,45 @@ upstream = "https://registry.npmjs.org"
 metadata_ttl = "5m"
 base_url = "http://127.0.0.1:8889"
 ```
+
+### Single-listener host-dispatch mode
+
+You can also bind one listener and route by `Host` header when protocols and hosts are aligned by index.
+
+```toml
+[server]
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "shared"
+address = ":443"
+protocols = ["go", "npm"]
+hosts = ["go.example.com", "npm.example.com"]
+
+[cache]
+enabled = true
+type = "disk"
+
+[cache.disk]
+path = "/tmp/toru-cache"
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = "https://registry.npmjs.org"
+metadata_ttl = "5m"
+base_url = "https://npm.example.com"
+```
+
+Rules for shared listeners:
+- `listeners.protocols` and `listeners.hosts` must have the same length
+- each host maps to the protocol at the same index
+- duplicate protocols or duplicate hosts are rejected
+- unknown hosts on a shared listener return `421 Misdirected Request`
 
 ## Go mode
 
@@ -226,9 +262,11 @@ always-auth=true
 
 ## Front-proxy routing examples
 
-Current deployment model is one Toru process with separate listeners per protocol.
+Current deployment model is one Toru process that can either:
+- run separate listeners per protocol, or
+- run one shared listener and dispatch by `Host` header
 
-HAProxy port split example:
+HAProxy host split example:
 
 ```haproxy
 frontend deps
@@ -243,7 +281,7 @@ backend toru_npm
     server toru-npm 127.0.0.1:8889
 ```
 
-Toru itself does not yet dispatch Go and npm traffic by host on a single listener. Keep one protocol per listener and let the front proxy route by host or port.
+If you prefer not to use shared-listener host dispatch inside Toru, you can still keep one protocol per listener and let the front proxy route by host or port.
 
 ## Local development
 

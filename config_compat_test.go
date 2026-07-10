@@ -3,14 +3,15 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
+	"time"
 )
 
 // Verification contract:
 // 1. Legacy Go-only config must continue to parse.
 // 2. Legacy config must normalize into explicit Go runtime semantics.
 // 3. New multi-listener config must decode into actual listener/protocol values.
+// 4. Same-listener host dispatch must require explicit host-to-protocol mapping.
 
 func TestLegacyConfigStillParsesAsGoOnly(t *testing.T) {
 	cfgText := `[server]
@@ -36,20 +37,24 @@ target_path = "github.com/example/mymodule"
 
 	cfg := loadConfigFromText(t, cfgText)
 
-	listeners := requireField(t, reflect.ValueOf(*cfg), "Listeners")
-	if listeners.Len() != 1 {
-		t.Fatalf("legacy config must synthesize exactly one Go listener, got %d", listeners.Len())
+	if len(cfg.Listeners) != 1 {
+		t.Fatalf("legacy config must synthesize exactly one Go listener, got %d", len(cfg.Listeners))
 	}
-
-	listener := listeners.Index(0)
-	address := stringField(t, listener, "Address")
-	if address != ":8888" {
-		t.Fatalf("legacy listener address = %q, want %q", address, ":8888")
+	listener := cfg.Listeners[0]
+	if listener.Name != "go" {
+		t.Fatalf("legacy listener name = %q, want %q", listener.Name, "go")
 	}
-
-	protocols := stringSliceField(t, listener, "Protocols")
-	if len(protocols) != 1 || protocols[0] != "go" {
-		t.Fatalf("legacy listener protocols = %v, want [go]", protocols)
+	if listener.Address != ":8888" {
+		t.Fatalf("legacy listener address = %q, want %q", listener.Address, ":8888")
+	}
+	if len(listener.Protocols) != 1 || listener.Protocols[0] != "go" {
+		t.Fatalf("legacy listener protocols = %v, want [go]", listener.Protocols)
+	}
+	if !cfg.Protocols.Go.Enabled {
+		t.Fatalf("legacy config must normalize to go enabled")
+	}
+	if cfg.Protocols.Go.FetchTimeout != 30*time.Second {
+		t.Fatalf("legacy go fetch timeout = %s, want 30s", cfg.Protocols.Go.FetchTimeout)
 	}
 }
 
@@ -90,49 +95,94 @@ base_url = "https://npm-toru.example.com"
 `
 
 	cfg := loadConfigFromText(t, cfgText)
-	root := reflect.ValueOf(*cfg)
-
-	listeners := requireField(t, root, "Listeners")
-	if listeners.Len() != 2 {
-		t.Fatalf("expected 2 listeners from config, got %d", listeners.Len())
+	if len(cfg.Listeners) != 2 {
+		t.Fatalf("expected 2 listeners from config, got %d", len(cfg.Listeners))
 	}
 
-	goListener := listeners.Index(0)
-	if got := stringField(t, goListener, "Name"); got != "go-public" {
-		t.Fatalf("go listener name = %q, want %q", got, "go-public")
+	goListener := cfg.Listeners[0]
+	if goListener.Name != "go-public" {
+		t.Fatalf("go listener name = %q, want %q", goListener.Name, "go-public")
 	}
-	if got := stringField(t, goListener, "Address"); got != ":8080" {
-		t.Fatalf("go listener address = %q, want %q", got, ":8080")
+	if goListener.Address != ":8080" {
+		t.Fatalf("go listener address = %q, want %q", goListener.Address, ":8080")
 	}
-	if got := stringSliceField(t, goListener, "Protocols"); len(got) != 1 || got[0] != "go" {
-		t.Fatalf("go listener protocols = %v, want [go]", got)
+	if len(goListener.Protocols) != 1 || goListener.Protocols[0] != "go" {
+		t.Fatalf("go listener protocols = %v, want [go]", goListener.Protocols)
 	}
-
-	npmListener := listeners.Index(1)
-	if got := stringField(t, npmListener, "Name"); got != "npm-public" {
-		t.Fatalf("npm listener name = %q, want %q", got, "npm-public")
-	}
-	if got := stringField(t, npmListener, "Address"); got != ":8081" {
-		t.Fatalf("npm listener address = %q, want %q", got, ":8081")
-	}
-	if got := stringSliceField(t, npmListener, "Protocols"); len(got) != 1 || got[0] != "npm" {
-		t.Fatalf("npm listener protocols = %v, want [npm]", got)
+	if len(goListener.Hosts) != 1 || goListener.Hosts[0] != "toru.example.com" {
+		t.Fatalf("go listener hosts = %v, want [toru.example.com]", goListener.Hosts)
 	}
 
-	protocols := requireField(t, root, "Protocols")
-	npmProtocol := requireField(t, protocols, "NPM")
-	if !boolField(t, npmProtocol, "Enabled") {
+	npmListener := cfg.Listeners[1]
+	if npmListener.Name != "npm-public" {
+		t.Fatalf("npm listener name = %q, want %q", npmListener.Name, "npm-public")
+	}
+	if npmListener.Address != ":8081" {
+		t.Fatalf("npm listener address = %q, want %q", npmListener.Address, ":8081")
+	}
+	if len(npmListener.Protocols) != 1 || npmListener.Protocols[0] != "npm" {
+		t.Fatalf("npm listener protocols = %v, want [npm]", npmListener.Protocols)
+	}
+	if len(npmListener.Hosts) != 1 || npmListener.Hosts[0] != "npm-toru.example.com" {
+		t.Fatalf("npm listener hosts = %v, want [npm-toru.example.com]", npmListener.Hosts)
+	}
+	if !cfg.Protocols.NPM.Enabled {
 		t.Fatalf("protocols.npm.enabled must decode to true")
 	}
-	if got := stringField(t, npmProtocol, "Upstream"); got != "https://registry.npmjs.org" {
-		t.Fatalf("protocols.npm.upstream = %q, want npm registry upstream", got)
+	if cfg.Protocols.NPM.Upstream != "https://registry.npmjs.org" {
+		t.Fatalf("protocols.npm.upstream = %q, want npm registry upstream", cfg.Protocols.NPM.Upstream)
 	}
-	if got := stringField(t, npmProtocol, "BaseURL"); got != "https://npm-toru.example.com" {
-		t.Fatalf("protocols.npm.base_url = %q, want %q", got, "https://npm-toru.example.com")
+	if cfg.Protocols.NPM.BaseURL != "https://npm-toru.example.com" {
+		t.Fatalf("protocols.npm.base_url = %q, want %q", cfg.Protocols.NPM.BaseURL, "https://npm-toru.example.com")
 	}
 }
 
-func TestMultiProtocolListenerRejectedUntilHostDispatchExists(t *testing.T) {
+func TestSingleListenerHostDispatchConfigParses(t *testing.T) {
+	cfgText := `[server]
+address = ":9999"
+log_level = "info"
+
+[[listeners]]
+name = "shared"
+address = ":8080"
+protocols = ["go", "npm"]
+hosts = ["toru.example.com", "npm-toru.example.com"]
+
+[cache]
+enabled = true
+type = "disk"
+
+[cache.disk]
+path = "/tmp/toru-cache"
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = "https://registry.npmjs.org"
+metadata_ttl = "5m"
+base_url = "https://npm-toru.example.com"
+`
+
+	cfg := loadConfigFromText(t, cfgText)
+	if len(cfg.Listeners) != 1 {
+		t.Fatalf("expected 1 shared listener, got %d", len(cfg.Listeners))
+	}
+	listener := cfg.Listeners[0]
+	if listener.Name != "shared" {
+		t.Fatalf("listener name = %q, want shared", listener.Name)
+	}
+	if len(listener.Protocols) != 2 || listener.Protocols[0] != "go" || listener.Protocols[1] != "npm" {
+		t.Fatalf("listener protocols = %v, want [go npm]", listener.Protocols)
+	}
+	if len(listener.Hosts) != 2 || listener.Hosts[0] != "toru.example.com" || listener.Hosts[1] != "npm-toru.example.com" {
+		t.Fatalf("listener hosts = %v, want [toru.example.com npm-toru.example.com]", listener.Hosts)
+	}
+}
+
+func TestSingleListenerHostDispatchRejectsAmbiguousConfig(t *testing.T) {
 	cfgText := `[server]
 address = ":9999"
 log_level = "info"
@@ -141,7 +191,7 @@ log_level = "info"
 name = "mixed"
 address = ":8080"
 protocols = ["go", "npm"]
-hosts = ["toru.example.com", "npm-toru.example.com"]
+hosts = ["toru.example.com"]
 `
 
 	tmp := t.TempDir()
@@ -156,7 +206,7 @@ hosts = ["toru.example.com", "npm-toru.example.com"]
 
 	_, err := initConfig(path, "TORU_")
 	if err == nil {
-		t.Fatalf("expected multi-protocol same-listener config to be rejected until host dispatch exists")
+		t.Fatalf("expected ambiguous same-listener host-dispatch config to be rejected")
 	}
 }
 
@@ -177,50 +227,4 @@ func loadConfigFromText(t *testing.T, content string) *Config {
 		t.Fatalf("initConfig() error = %v", err)
 	}
 	return cfg
-}
-
-func requireField(t *testing.T, v reflect.Value, name string) reflect.Value {
-	t.Helper()
-	if v.Kind() == reflect.Pointer {
-		v = v.Elem()
-	}
-	field := v.FieldByName(name)
-	if !field.IsValid() {
-		t.Fatalf("expected field %q to exist", name)
-	}
-	return field
-}
-
-func stringField(t *testing.T, v reflect.Value, name string) string {
-	t.Helper()
-	field := requireField(t, v, name)
-	if field.Kind() != reflect.String {
-		t.Fatalf("field %q must be string, got %s", name, field.Kind())
-	}
-	return field.String()
-}
-
-func boolField(t *testing.T, v reflect.Value, name string) bool {
-	t.Helper()
-	field := requireField(t, v, name)
-	if field.Kind() != reflect.Bool {
-		t.Fatalf("field %q must be bool, got %s", name, field.Kind())
-	}
-	return field.Bool()
-}
-
-func stringSliceField(t *testing.T, v reflect.Value, name string) []string {
-	t.Helper()
-	field := requireField(t, v, name)
-	if field.Kind() != reflect.Slice {
-		t.Fatalf("field %q must be slice, got %s", name, field.Kind())
-	}
-	out := make([]string, field.Len())
-	for i := 0; i < field.Len(); i++ {
-		if field.Index(i).Kind() != reflect.String {
-			t.Fatalf("field %q must be []string", name)
-		}
-		out[i] = field.Index(i).String()
-	}
-	return out
 }
