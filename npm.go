@@ -46,11 +46,16 @@ func (h *npmHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *npmHandler) handleMetadata(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
 	pkg := decodeNPMPackagePath(r.URL.Path)
+	finalSize := 0
+	defer func() { recordProtocolRequest("npm", "metadata", time.Since(startTime), finalSize) }()
+
 	if pkg == "" {
 		http.Error(w, "invalid package path", http.StatusBadRequest)
 		return
 	}
+	h.logger.Info("Received request", "protocol", "npm", "kind", "metadata", "method", r.Method, "path", r.URL.Path, "package", pkg)
 
 	if rule, ok := matchProtectedScope(h.cfg.Protocols.NPM.ProtectedScopes, pkg); ok {
 		if !authorizeRequest(w, r, h.authenticators, rule.AuthModule, AuthRequest{Protocol: "npm", Path: r.URL.Path, Resource: pkg}) {
@@ -59,16 +64,19 @@ func (h *npmHandler) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if body, ok := h.readFreshMetadataCache(pkg); ok {
+		recordProtocolCacheHit("npm", "metadata")
 		rewritten, err := rewriteNPMMetadataTarballs(body, h.cfg.Protocols.NPM.BaseURL, pkg)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		finalSize = len(rewritten)
 		_, _ = w.Write(rewritten)
 		return
 	}
 
+	recordProtocolCacheMiss("npm", "metadata")
 	upstreamURL := strings.TrimSuffix(h.cfg.Protocols.NPM.Upstream, "/") + "/" + encodeNPMPackagePath(pkg)
 	resp, body, err := h.doUpstreamGet(r, upstreamURL)
 	if err != nil {
@@ -78,36 +86,56 @@ func (h *npmHandler) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		w.WriteHeader(resp.StatusCode)
+		finalSize = len(body)
 		_, _ = w.Write(body)
 		return
 	}
-	_ = h.writeMetadataCache(pkg, body)
+	wroteMetadataCache, err := h.writeMetadataCache(pkg, body)
+	if err == nil {
+		if wroteMetadataCache {
+			recordProtocolCacheWrite("npm", "metadata")
+		}
+	} else {
+		recordProtocolCacheError("npm", "metadata")
+	}
 	rewritten, err := rewriteNPMMetadataTarballs(body, h.cfg.Protocols.NPM.BaseURL, pkg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	finalSize = len(rewritten)
 	_, _ = w.Write(rewritten)
 }
 
 func (h *npmHandler) handleTarball(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
 	pkg, filename := parseNPMTarballPath(r.URL.Path)
+	finalSize := 0
+	defer func() { recordProtocolRequest("npm", "artifact", time.Since(startTime), finalSize) }()
+
 	if pkg == "" || filename == "" {
 		http.Error(w, "invalid tarball path", http.StatusBadRequest)
 		return
 	}
+	h.logger.Info("Received request", "protocol", "npm", "kind", "artifact", "method", r.Method, "path", r.URL.Path, "package", pkg, "filename", filename)
+
 	if rule, ok := matchProtectedScope(h.cfg.Protocols.NPM.ProtectedScopes, pkg); ok {
 		if !authorizeRequest(w, r, h.authenticators, rule.AuthModule, AuthRequest{Protocol: "npm", Path: r.URL.Path, Resource: pkg}) {
 			return
 		}
 	}
 
-	cachePath := filepath.Join(h.cfg.Cache.Disk.Path, "npm", npmCachePackageKey(pkg), filename)
-	if body, err := os.ReadFile(cachePath); err == nil {
-		w.Header().Set("Content-Type", "application/octet-stream")
-		_, _ = w.Write(body)
-		return
+	cachePath := h.tarballCachePath(pkg, filename)
+	if cachePath != "" {
+		if body, err := os.ReadFile(cachePath); err == nil {
+			recordProtocolCacheHit("npm", "artifact")
+			w.Header().Set("Content-Type", "application/octet-stream")
+			finalSize = len(body)
+			_, _ = w.Write(body)
+			return
+		}
+		recordProtocolCacheMiss("npm", "artifact")
 	}
 
 	upstreamURL := strings.TrimSuffix(h.cfg.Protocols.NPM.Upstream, "/") + "/" + pkg + "/-/" + filename
@@ -119,22 +147,31 @@ func (h *npmHandler) handleTarball(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		w.WriteHeader(resp.StatusCode)
+		finalSize = len(body)
 		_, _ = w.Write(body)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
-		h.logger.Error("failed to create npm cache directory; serving uncached body", "path", filepath.Dir(cachePath), "error", err)
-		w.Header().Set("Content-Type", "application/octet-stream")
-		_, _ = w.Write(body)
-		return
-	}
-	if err := os.WriteFile(cachePath, body, 0o644); err != nil {
-		h.logger.Error("failed to write npm cache file; serving uncached body", "path", cachePath, "error", err)
-		w.Header().Set("Content-Type", "application/octet-stream")
-		_, _ = w.Write(body)
-		return
+	if cachePath != "" {
+		if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+			h.logger.Error("failed to create npm cache directory; serving uncached body", "path", filepath.Dir(cachePath), "error", err)
+			recordProtocolCacheError("npm", "artifact")
+			w.Header().Set("Content-Type", "application/octet-stream")
+			finalSize = len(body)
+			_, _ = w.Write(body)
+			return
+		}
+		if err := os.WriteFile(cachePath, body, 0o644); err != nil {
+			h.logger.Error("failed to write npm cache file; serving uncached body", "path", cachePath, "error", err)
+			recordProtocolCacheError("npm", "artifact")
+			w.Header().Set("Content-Type", "application/octet-stream")
+			finalSize = len(body)
+			_, _ = w.Write(body)
+			return
+		}
+		recordProtocolCacheWrite("npm", "artifact")
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
+	finalSize = len(body)
 	_, _ = w.Write(body)
 }
 
@@ -188,8 +225,19 @@ func (h *npmHandler) metadataCacheEnabled() bool {
 	return h.cfg.Cache.Enabled && h.cfg.Cache.Type == "disk" && h.cfg.Cache.Disk.Path != "" && h.cfg.Protocols.NPM.MetadataTTL > 0
 }
 
+func (h *npmHandler) artifactCacheEnabled() bool {
+	return h.cfg.Cache.Enabled && h.cfg.Cache.Type == "disk" && h.cfg.Cache.Disk.Path != ""
+}
+
 func (h *npmHandler) metadataCachePath(pkg string) string {
 	return filepath.Join(h.cfg.Cache.Disk.Path, "npm-meta", npmCachePackageKey(pkg)+".json")
+}
+
+func (h *npmHandler) tarballCachePath(pkg, filename string) string {
+	if !h.artifactCacheEnabled() {
+		return ""
+	}
+	return filepath.Join(h.cfg.Cache.Disk.Path, "npm", npmCachePackageKey(pkg), filename)
 }
 
 func (h *npmHandler) readFreshMetadataCache(pkg string) ([]byte, bool) {
@@ -211,20 +259,20 @@ func (h *npmHandler) readFreshMetadataCache(pkg string) ([]byte, bool) {
 	return body, true
 }
 
-func (h *npmHandler) writeMetadataCache(pkg string, body []byte) error {
+func (h *npmHandler) writeMetadataCache(pkg string, body []byte) (bool, error) {
 	if !h.metadataCacheEnabled() {
-		return nil
+		return false, nil
 	}
 	path := h.metadataCachePath(pkg)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		h.logger.Error("failed to create npm metadata cache directory; serving uncached body", "path", filepath.Dir(path), "error", err)
-		return err
+		return false, err
 	}
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		h.logger.Error("failed to write npm metadata cache file; serving uncached body", "path", path, "error", err)
-		return err
+		return false, err
 	}
-	return nil
+	return true, nil
 }
 
 func rewriteNPMMetadataTarballs(body []byte, baseURL, packageName string) ([]byte, error) {

@@ -44,6 +44,163 @@ func TestMixedModeRuntimeExposesMetricsAndNPMListener(t *testing.T) {
 	if !strings.Contains(body, fmt.Sprintf("http://127.0.0.1:%d/toru-fixture-pkg/-/toru-fixture-pkg-1.0.0.tgz", npmPort)) {
 		t.Fatalf("npm metadata must rewrite tarball URL back to Toru, body=%q", body)
 	}
+
+	_, metricsBody, err := getURL(fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort))
+	if err != nil {
+		t.Fatalf("scrape metrics: %v", err)
+	}
+	for _, want := range []string{
+		`toru_requests_by_protocol_total{protocol="npm",kind="metadata"}`,
+		`toru_request_duration_by_protocol_seconds_count{protocol="npm",kind="metadata"}`,
+		`toru_response_size_by_protocol_bytes_count{protocol="npm",kind="metadata"}`,
+		`toru_cache_misses_by_protocol_total{protocol="npm",class="metadata"}`,
+		`toru_cache_writes_by_protocol_total{protocol="npm",class="metadata"}`,
+	} {
+		if !strings.Contains(metricsBody, want) {
+			t.Fatalf("expected metrics scrape to contain %q, body=%q", want, metricsBody)
+		}
+	}
+}
+
+func TestGoRequestMetricsCountUnauthorizedAuthRejections(t *testing.T) {
+	goPort := freePort(t)
+	npmPort := freePort(t)
+	upstream := newFakeNPMRegistry(t)
+
+	cfgText := fmt.Sprintf(`[server]
+address = ":%d"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":%d"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":%d"
+protocols = ["npm"]
+
+[cache]
+enabled = true
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = %q
+
+[auth]
+enabled = true
+
+[[auth.modules]]
+name = "static"
+type = "static_token"
+options.token = "secret"
+options.protected_uri = "go.example.com"
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = %q
+metadata_ttl = "5m"
+base_url = "http://127.0.0.1:%d"
+`, goPort, goPort, npmPort, filepath.Join(t.TempDir(), "cache"), upstream.URL, npmPort)
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+
+	waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort), 10*time.Second)
+
+	resp, body, err := getURL(fmt.Sprintf("http://127.0.0.1:%d/go.example.com/team/workflows/@v/list", goPort))
+	if err != nil {
+		t.Fatalf("expected go listener to accept request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated go protected path status = %d body=%q, want 401", resp.StatusCode, body)
+	}
+
+	_, metricsBody, err := getURL(fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort))
+	if err != nil {
+		t.Fatalf("scrape metrics: %v", err)
+	}
+	for _, want := range []string{
+		`toru_requests_total 1`,
+		`toru_requests_by_protocol_total{protocol="go",kind="proxy"} 1`,
+		`toru_request_duration_seconds_count 1`,
+		`toru_request_duration_by_protocol_seconds_count{protocol="go",kind="proxy"} 1`,
+	} {
+		if !strings.Contains(metricsBody, want) {
+			t.Fatalf("expected metrics scrape to contain %q, body=%q", want, metricsBody)
+		}
+	}
+}
+
+func TestMixedModeRuntimeDoesNotReportMetadataCacheWriteWhenMetadataCacheDisabled(t *testing.T) {
+	goPort := freePort(t)
+	npmPort := freePort(t)
+	upstream := newFakeNPMRegistry(t)
+
+	cfgText := fmt.Sprintf(`[server]
+address = ":%d"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":%d"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":%d"
+protocols = ["npm"]
+
+[cache]
+enabled = false
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = %q
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = %q
+metadata_ttl = "5m"
+base_url = "http://127.0.0.1:%d"
+`, goPort, goPort, npmPort, filepath.Join(t.TempDir(), "cache"), upstream.URL, npmPort)
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+
+	waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort), 10*time.Second)
+
+	resp, body, err := getURL(fmt.Sprintf("http://127.0.0.1:%d/toru-fixture-pkg", npmPort))
+	if err != nil {
+		t.Fatalf("expected npm listener to accept metadata request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("npm metadata status = %d body=%q, want 200", resp.StatusCode, body)
+	}
+
+	_, metricsBody, err := getURL(fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort))
+	if err != nil {
+		t.Fatalf("scrape metrics: %v", err)
+	}
+	if strings.Contains(metricsBody, `toru_cache_writes_by_protocol_total{protocol="npm",class="metadata"}`) {
+		t.Fatalf("metrics should not report npm metadata cache writes when metadata cache is disabled, body=%q", metricsBody)
+	}
+	if !strings.Contains(metricsBody, `toru_cache_misses_by_protocol_total{protocol="npm",class="metadata"}`) {
+		t.Fatalf("expected metadata miss metric when metadata cache is disabled, body=%q", metricsBody)
+	}
 }
 
 func testMixedModeConfig(t *testing.T, goPort, npmPort int, upstreamURL string) string {

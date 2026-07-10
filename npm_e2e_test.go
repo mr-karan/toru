@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -586,6 +587,89 @@ func TestNPMScopedTarballUsesDecodedUpstreamPathAndCaches(t *testing.T) {
 	}
 	if hits := scopedHits.Load(); hits != 1 {
 		t.Fatalf("scoped upstream tarball hits after cached request = %d, want still 1", hits)
+	}
+}
+
+func TestNPMTarballCacheDisabledDoesNotPersistOrEmitArtifactCacheMetrics(t *testing.T) {
+	goPort := freePort(t)
+	npmPort := freePort(t)
+	var tarballHits atomic.Int32
+	upstream := newCountingFakeNPMRegistry(t, &tarballHits)
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+
+	cfgText := fmt.Sprintf(`[server]
+address = ":%d"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":%d"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":%d"
+protocols = ["npm"]
+
+[cache]
+enabled = false
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = %q
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = %q
+metadata_ttl = "5m"
+base_url = "http://127.0.0.1:%d"
+`, goPort, goPort, npmPort, cacheRoot, upstream.URL, npmPort)
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+
+	waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort), 10*time.Second)
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/toru-fixture-pkg/-/toru-fixture-pkg-1.0.0.tgz", npmPort)
+	resp1, body1, err := getURL(url)
+	if err != nil {
+		t.Fatalf("first tarball request: %v", err)
+	}
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("first tarball status=%d body=%q, want 200", resp1.StatusCode, body1)
+	}
+	resp2, body2, err := getURL(url)
+	if err != nil {
+		t.Fatalf("second tarball request: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("second tarball status=%d body=%q, want 200", resp2.StatusCode, body2)
+	}
+	if hits := tarballHits.Load(); hits != 2 {
+		t.Fatalf("upstream tarball hits with cache disabled = %d, want 2", hits)
+	}
+	if _, err := os.Stat(filepath.Join(cacheRoot, "npm", "toru-fixture-pkg", "toru-fixture-pkg-1.0.0.tgz")); !os.IsNotExist(err) {
+		t.Fatalf("tarball cache file should not be written when cache is disabled, err=%v", err)
+	}
+	_, metricsBody, err := getURL(fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort))
+	if err != nil {
+		t.Fatalf("scrape metrics: %v", err)
+	}
+	if strings.Contains(metricsBody, `toru_cache_writes_by_protocol_total{protocol="npm",class="artifact"}`) {
+		t.Fatalf("artifact cache write metric should not be emitted when cache is disabled, body=%q", metricsBody)
+	}
+	if strings.Contains(metricsBody, `toru_cache_hits_by_protocol_total{protocol="npm",class="artifact"}`) {
+		t.Fatalf("artifact cache hit metric should not be emitted when cache is disabled, body=%q", metricsBody)
+	}
+	if strings.Contains(metricsBody, `toru_cache_misses_by_protocol_total{protocol="npm",class="artifact"}`) {
+		t.Fatalf("artifact cache miss metric should not be emitted when cache is disabled, body=%q", metricsBody)
 	}
 }
 

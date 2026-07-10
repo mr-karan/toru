@@ -91,12 +91,17 @@ func newProxy(cfg *Config, logger *slog.Logger) (*Proxy, error) {
 	}, nil
 }
 
-
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	requestsTotal.Inc()
 	startTime := time.Now()
+	// Wrap the ResponseWriter immediately so early auth/error returns are counted too.
+	rw := &responseWriter{ResponseWriter: w}
+	defer func() {
+		recordProtocolRequest("go", "proxy", time.Since(startTime), rw.size)
+	}()
 
 	p.logger.Info("Received request",
+		"protocol", "go",
+		"kind", "proxy",
 		"method", r.Method,
 		"path", r.URL.Path,
 		"remote_addr", r.RemoteAddr,
@@ -105,21 +110,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Auth.Enabled {
 		authMethod, _, ok := r.BasicAuth()
 		if !ok {
-			http.Error(w, "No username or password provided", http.StatusUnauthorized)
+			http.Error(rw, "No username or password provided", http.StatusUnauthorized)
 			return
 		}
-		if !authorizeRequest(w, r, p.authenticators, authMethod, AuthRequest{Protocol: "go", Path: r.URL.Path, Resource: r.URL.Path}) {
+		if !authorizeRequest(rw, r, p.authenticators, authMethod, AuthRequest{Protocol: "go", Path: r.URL.Path, Resource: r.URL.Path}) {
 			return
 		}
 	}
 
-	// Wrap the ResponseWriter to capture the response size
-	rw := &responseWriter{ResponseWriter: w}
-
 	p.client.ServeHTTP(rw, r)
-
-	requestDuration.UpdateDuration(startTime)
-	responseSize.Update(float64(rw.size))
 }
 
 // responseWriter wraps http.ResponseWriter to capture the response size
