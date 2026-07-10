@@ -273,6 +273,241 @@ base_url = "http://127.0.0.1:%d"
 	}
 }
 
+func TestNPMProtectedScopeRequiresAuth(t *testing.T) {
+	goPort := freePort(t)
+	npmPort := freePort(t)
+	upstream := newFakeNPMRegistry(t)
+
+	cfgText := fmt.Sprintf(`[server]
+address = ":%d"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":%d"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":%d"
+protocols = ["npm"]
+
+[cache]
+enabled = true
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = %q
+
+[auth]
+enabled = true
+
+[[auth.modules]]
+name = "static"
+type = "static_token"
+options.token = "secret"
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = %q
+metadata_ttl = "0"
+base_url = "http://127.0.0.1:%d"
+
+[[protocols.npm.protected_scopes]]
+scope = "@toru"
+auth_module = "static"
+`, goPort, goPort, npmPort, filepath.Join(t.TempDir(), "cache"), upstream.URL, npmPort)
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+
+	waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort), 10*time.Second)
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/%%40toru%%2Ffixture-scoped", npmPort)
+	resp1, _, err := getURL(url)
+	if err != nil {
+		t.Fatalf("unauthenticated protected metadata request: %v", err)
+	}
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated protected metadata status=%d, want 401", resp1.StatusCode)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.SetBasicAuth("static", "secret")
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("authenticated protected metadata request: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated protected metadata status=%d, want 200", resp2.StatusCode)
+	}
+}
+
+func TestNPMProtectedScopeAcceptsBearerAuth(t *testing.T) {
+	for _, authHeader := range []string{"Bearer secret", "bearer secret", "BeArEr secret"} {
+		t.Run(authHeader, func(t *testing.T) {
+			goPort := freePort(t)
+			npmPort := freePort(t)
+			upstream := newFakeNPMRegistry(t)
+
+			cfgText := fmt.Sprintf(`[server]
+address = ":%d"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":%d"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":%d"
+protocols = ["npm"]
+
+[cache]
+enabled = true
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = %q
+
+[auth]
+enabled = true
+
+[[auth.modules]]
+name = "static"
+type = "static_token"
+options.token = "secret"
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = %q
+metadata_ttl = "0"
+base_url = "http://127.0.0.1:%d"
+
+[[protocols.npm.protected_scopes]]
+scope = "@toru"
+auth_module = "static"
+`, goPort, goPort, npmPort, filepath.Join(t.TempDir(), "cache"), upstream.URL, npmPort)
+			proc := startToruProcess(t, cfgText)
+			defer stopCmd(t, proc)
+
+			waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort), 10*time.Second)
+
+			url := fmt.Sprintf("http://127.0.0.1:%d/%%40toru%%2Ffixture-scoped", npmPort)
+			req, err := http.NewRequest(http.MethodGet, url, nil)
+			if err != nil {
+				t.Fatalf("new bearer request: %v", err)
+			}
+			req.Header.Set("Authorization", authHeader)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("bearer protected metadata request: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("bearer protected metadata status=%d, want 200", resp.StatusCode)
+			}
+		})
+	}
+}
+
+func TestNPMProtectedScopeMetadataCacheStillRequiresAuth(t *testing.T) {
+	goPort := freePort(t)
+	npmPort := freePort(t)
+	upstream := newFakeNPMRegistry(t)
+
+	cfgText := fmt.Sprintf(`[server]
+address = ":%d"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":%d"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":%d"
+protocols = ["npm"]
+
+[cache]
+enabled = true
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = %q
+
+[auth]
+enabled = true
+
+[[auth.modules]]
+name = "static"
+type = "static_token"
+options.token = "secret"
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = %q
+metadata_ttl = "5m"
+base_url = "http://127.0.0.1:%d"
+
+[[protocols.npm.protected_scopes]]
+scope = "@toru"
+auth_module = "static"
+`, goPort, goPort, npmPort, filepath.Join(t.TempDir(), "cache"), upstream.URL, npmPort)
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+
+	waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort), 10*time.Second)
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/%%40toru%%2Ffixture-scoped", npmPort)
+	reqWarm, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("new warm request: %v", err)
+	}
+	reqWarm.SetBasicAuth("static", "secret")
+	respWarm, err := http.DefaultClient.Do(reqWarm)
+	if err != nil {
+		t.Fatalf("warm protected metadata request: %v", err)
+	}
+	respWarm.Body.Close()
+	if respWarm.StatusCode != http.StatusOK {
+		t.Fatalf("warm protected metadata status=%d, want 200", respWarm.StatusCode)
+	}
+
+	resp2, _, err := getURL(url)
+	if err != nil {
+		t.Fatalf("unauthenticated cached metadata request: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated cached metadata status=%d, want 401", resp2.StatusCode)
+	}
+}
+
 func TestNPMTarballMissFetchesFromUpstreamAndCaches(t *testing.T) {
 	goPort := freePort(t)
 	npmPort := freePort(t)

@@ -23,6 +23,11 @@ func buildListeners(cfg *Config, logger *slog.Logger) ([]runtimeServer, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Build a shared authenticator set for non-go handlers too.
+	authenticators, err := buildAuthenticators(cfg)
+	if err != nil {
+		return nil, err
+	}
 
 	servers := make([]runtimeServer, 0, len(cfg.Listeners))
 	for _, listener := range cfg.Listeners {
@@ -39,7 +44,7 @@ func buildListeners(cfg *Config, logger *slog.Logger) ([]runtimeServer, error) {
 		case "go":
 			mux.Handle("/", goProxy)
 		case "npm":
-			mux.Handle("/", newNPMHandler(cfg, logger))
+			mux.Handle("/", newNPMHandler(cfg, logger, authenticators))
 		default:
 			return nil, fmt.Errorf("unsupported protocol: %s", listener.Protocols[0])
 		}

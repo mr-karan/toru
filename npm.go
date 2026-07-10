@@ -14,20 +14,22 @@ import (
 )
 
 type npmHandler struct {
-	cfg        *Config
-	logger     *slog.Logger
-	httpClient *http.Client
+	cfg            *Config
+	logger         *slog.Logger
+	httpClient     *http.Client
+	authenticators map[string]Authenticator
 }
 
-func newNPMHandler(cfg *Config, logger *slog.Logger) http.Handler {
+func newNPMHandler(cfg *Config, logger *slog.Logger, authenticators map[string]Authenticator) http.Handler {
 	timeout := cfg.Server.FetchTimeout
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
 	return &npmHandler{
-		cfg:        cfg,
-		logger:     logger.With("component", "npm"),
-		httpClient: &http.Client{Timeout: timeout},
+		cfg:            cfg,
+		logger:         logger.With("component", "npm"),
+		httpClient:     &http.Client{Timeout: timeout},
+		authenticators: authenticators,
 	}
 }
 
@@ -48,6 +50,12 @@ func (h *npmHandler) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	if pkg == "" {
 		http.Error(w, "invalid package path", http.StatusBadRequest)
 		return
+	}
+
+	if rule, ok := matchProtectedScope(h.cfg.Protocols.NPM.ProtectedScopes, pkg); ok {
+		if !authorizeRequest(w, r, h.authenticators, rule.AuthModule, AuthRequest{Protocol: "npm", Path: r.URL.Path, Resource: pkg}) {
+			return
+		}
 	}
 
 	if body, ok := h.readFreshMetadataCache(pkg); ok {
@@ -89,6 +97,12 @@ func (h *npmHandler) handleTarball(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid tarball path", http.StatusBadRequest)
 		return
 	}
+	if rule, ok := matchProtectedScope(h.cfg.Protocols.NPM.ProtectedScopes, pkg); ok {
+		if !authorizeRequest(w, r, h.authenticators, rule.AuthModule, AuthRequest{Protocol: "npm", Path: r.URL.Path, Resource: pkg}) {
+			return
+		}
+	}
+
 	cachePath := filepath.Join(h.cfg.Cache.Disk.Path, "npm", npmCachePackageKey(pkg), filename)
 	if body, err := os.ReadFile(cachePath); err == nil {
 		w.Header().Set("Content-Type", "application/octet-stream")

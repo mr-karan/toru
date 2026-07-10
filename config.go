@@ -69,10 +69,17 @@ type GoProtocolConfig struct {
 }
 
 type NPMProtocolConfig struct {
-	Enabled     bool          `koanf:"enabled"`
-	Upstream    string        `koanf:"upstream"`
-	MetadataTTL time.Duration `koanf:"metadata_ttl"`
-	BaseURL     string        `koanf:"base_url"`
+	Enabled         bool                 `koanf:"enabled"`
+	Upstream        string               `koanf:"upstream"`
+	MetadataTTL     time.Duration        `koanf:"metadata_ttl"`
+	BaseURL         string               `koanf:"base_url"`
+	ProtectedScopes []ProtectedScopeRule `koanf:"protected_scopes"`
+}
+
+
+type ProtectedScopeRule struct {
+	Scope      string `koanf:"scope"`
+	AuthModule string `koanf:"auth_module"`
 }
 
 // AuthModule represents an auth module configuration.

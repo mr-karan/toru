@@ -69,3 +69,64 @@ func TestExtractProjectCandidates(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractNPMProjectCandidates(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		pkg            string
+		protectedScope string
+		projectPrefix  string
+		want           []string
+		wantSkip       bool
+		wantErr        bool
+	}{
+		{
+			name:           "scoped package with prefix",
+			pkg:            "@toru/fixture-scoped",
+			protectedScope: "@toru",
+			projectPrefix:  "team/npm",
+			want:           []string{"team/npm/fixture-scoped"},
+		},
+		{
+			name:           "unprotected scope skipped",
+			pkg:            "@other/fixture",
+			protectedScope: "@toru",
+			wantSkip:       true,
+		},
+		{
+			name:           "invalid nested npm path",
+			pkg:            "@toru/fixture/subpath",
+			protectedScope: "@toru",
+			wantErr:        true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, skip, err := extractNPMProjectCandidates(tt.pkg, tt.protectedScope, tt.projectPrefix)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("extractNPMProjectCandidates() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if skip != tt.wantSkip {
+				t.Fatalf("extractNPMProjectCandidates() skip = %v, want %v", skip, tt.wantSkip)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("extractNPMProjectCandidates() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStaticTokenAuthenticator(t *testing.T) {
+	t.Parallel()
+	a := &StaticTokenAuthenticator{Token: "secret"}
+
+	if _, ok, err := a.Authenticate("wrong", AuthRequest{Protocol: "npm", Resource: "@toru/fixture"}); err != ErrorAuthFailed || ok {
+		t.Fatalf("wrong token must fail auth, got ok=%v err=%v", ok, err)
+	}
+	if skip, ok, err := a.Authenticate("secret", AuthRequest{Protocol: "npm", Resource: "@toru/fixture"}); err != nil || skip || !ok {
+		t.Fatalf("correct token must pass auth, got skip=%v ok=%v err=%v", skip, ok, err)
+	}
+}

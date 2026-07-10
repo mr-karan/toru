@@ -10,30 +10,50 @@ import (
 	gitlab "gitlab.com/gitlab-org/api/client-go/v2"
 )
 
-// Authentiactor interface defines the methods to authenticate the user.
+// AuthRequest carries protocol-aware authorization context.
+type AuthRequest struct {
+	Protocol string
+	Path     string
+	Resource string
+}
+
+// Authenticator defines protocol-aware authentication.
 type Authenticator interface {
-	Authenticate(token, projectPath string) (bool, bool, error)
+	Authenticate(token string, req AuthRequest) (bool, bool, error)
 }
 
 var (
 	_               = Authenticator(&GitLabAuthenticator{})
+	_               = Authenticator(&StaticTokenAuthenticator{})
 	ErrorAuthFailed = errors.New("authentication failed")
 )
 
-// GitLabAuthenticator is a struct that implements the Authenticator interface.
+// GitLabAuthenticator checks whether a token can access a GitLab project path.
 type GitLabAuthenticator struct {
 	RootURL      string
 	ProtectedURI string
+	ProjectPrefix string
 }
 
-// Authenticate method authenticates the user based on the token and project path.
-func (g *GitLabAuthenticator) Authenticate(token, uri string) (bool, bool, error) {
-	projectCandidates, skip, err := extractProjectCandidates(uri, g.ProtectedURI)
+func (g *GitLabAuthenticator) Authenticate(token string, req AuthRequest) (bool, bool, error) {
+	var (
+		projectCandidates []string
+		skip              bool
+		err               error
+	)
+
+	switch req.Protocol {
+	case "go":
+		projectCandidates, skip, err = extractProjectCandidates(req.Path, g.ProtectedURI)
+	case "npm":
+		projectCandidates, skip, err = extractNPMProjectCandidates(req.Resource, g.ProtectedURI, g.ProjectPrefix)
+	default:
+		return true, false, nil
+	}
 	if err != nil || skip {
 		return skip, false, err
 	}
 
-	// Create a new GitLab client with the user's token
 	gl, err := gitlab.NewClient(token, gitlab.WithBaseURL(g.RootURL))
 	if err != nil {
 		return skip, false, fmt.Errorf("failed to create GitLab client: %w", err)
@@ -51,10 +71,8 @@ func (g *GitLabAuthenticator) Authenticate(token, uri string) (bool, bool, error
 			if strings.Contains(err.Error(), "401 Unauthorized") || strings.Contains(err.Error(), "403 Forbidden") {
 				return skip, false, ErrorAuthFailed
 			}
-
 			return skip, false, fmt.Errorf("failed to get project: %w", err)
 		}
-
 		if prj != nil {
 			return skip, true, nil
 		}
@@ -93,28 +111,68 @@ func extractProjectCandidates(uri, protectedURI string) ([]string, bool, error) 
 	return slices.Compact(projectCandidates), false, nil
 }
 
-// NewGitlabAuthenticator creates a new GitLab authenticator.
+func extractNPMProjectCandidates(pkg, protectedScope, projectPrefix string) ([]string, bool, error) {
+	protectedScope = strings.TrimSpace(protectedScope)
+	if protectedScope == "" {
+		return nil, false, fmt.Errorf("protected_uri is empty")
+	}
+	if pkg != protectedScope && !strings.HasPrefix(pkg, protectedScope+"/") {
+		return nil, true, nil
+	}
+	name := strings.TrimPrefix(pkg, protectedScope)
+	name = strings.TrimPrefix(name, "/")
+	if name == "" || strings.Contains(name, "/") {
+		return nil, false, fmt.Errorf("invalid npm package path")
+	}
+	candidate := name
+	if projectPrefix != "" {
+		candidate = strings.TrimSuffix(projectPrefix, "/") + "/" + name
+	}
+	return []string{candidate}, false, nil
+}
+
+// StaticTokenAuthenticator allows deterministic auth testing and simple deployments.
+type StaticTokenAuthenticator struct {
+	Token string
+}
+
+func (s *StaticTokenAuthenticator) Authenticate(token string, req AuthRequest) (bool, bool, error) {
+	if s.Token == "" {
+		return false, false, fmt.Errorf("missing token")
+	}
+	if token != s.Token {
+		return false, false, ErrorAuthFailed
+	}
+	return false, true, nil
+}
+
 func NewGitlabAuthenticator(opts map[string]interface{}) (*GitLabAuthenticator, error) {
-	// Check if the URL is provided.
 	url, ok := opts["root_url"].(string)
 	if !ok {
 		return nil, fmt.Errorf("missing root_url")
 	}
-
-	// Check if the protected URI is provided.
-	protectedURIs, ok := opts["protected_uri"].(string)
+	protectedURI, ok := opts["protected_uri"].(string)
 	if !ok {
 		return nil, fmt.Errorf("missing protected_uri")
 	}
-
-	return &GitLabAuthenticator{RootURL: url, ProtectedURI: protectedURIs}, nil
+	projectPrefix, _ := opts["project_prefix"].(string)
+	return &GitLabAuthenticator{RootURL: url, ProtectedURI: protectedURI, ProjectPrefix: projectPrefix}, nil
 }
 
-// NewAuthenticator creates a new authenticator based on the module type.
+func NewStaticTokenAuthenticator(opts map[string]interface{}) (*StaticTokenAuthenticator, error) {
+	token, ok := opts["token"].(string)
+	if !ok || token == "" {
+		return nil, fmt.Errorf("missing token")
+	}
+	return &StaticTokenAuthenticator{Token: token}, nil
+}
+
 func NewAuthenticator(module AuthModule) (Authenticator, error) {
 	switch module.Type {
 	case "gitlab_access_token":
 		return NewGitlabAuthenticator(module.Options)
+	case "static_token":
+		return NewStaticTokenAuthenticator(module.Options)
 	default:
 		return nil, fmt.Errorf("unsupported auth type: %s", module.Type)
 	}
