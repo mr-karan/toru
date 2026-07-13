@@ -16,6 +16,7 @@ type AuthRequest struct {
 	Path     string
 	Resource string
 	Scope    string
+	RepoPath string
 }
 
 // Authenticator defines protocol-aware authentication.
@@ -47,11 +48,15 @@ func (g *GitLabAuthenticator) Authenticate(token string, req AuthRequest) (bool,
 	case "go":
 		projectCandidates, skip, err = extractProjectCandidates(req.Path, g.ProtectedURI)
 	case "npm":
-		protectedScope := req.Scope
-		if protectedScope == "" {
-			protectedScope = g.ProtectedURI
+		if req.RepoPath != "" {
+			projectCandidates, skip, err = extractExplicitRepoPathCandidate(req.RepoPath)
+		} else {
+			protectedScope := req.Scope
+			if protectedScope == "" {
+				protectedScope = g.ProtectedURI
+			}
+			projectCandidates, skip, err = extractNPMProjectCandidates(req.Resource, protectedScope, g.ProjectPrefix)
 		}
-		projectCandidates, skip, err = extractNPMProjectCandidates(req.Resource, protectedScope, g.ProjectPrefix)
 	default:
 		return true, false, nil
 	}
@@ -114,6 +119,23 @@ func extractProjectCandidates(uri, protectedURI string) ([]string, bool, error) 
 	}
 
 	return slices.Compact(projectCandidates), false, nil
+}
+
+func extractExplicitRepoPathCandidate(repoPath string) ([]string, bool, error) {
+	repoPath = strings.Trim(strings.TrimSpace(repoPath), "/")
+	if repoPath == "" {
+		return nil, false, fmt.Errorf("repo path is empty")
+	}
+	parts := strings.Split(repoPath, "/")
+	if len(parts) < 2 {
+		return nil, false, fmt.Errorf("invalid repo path")
+	}
+	for _, part := range parts {
+		if part == "" {
+			return nil, false, fmt.Errorf("invalid repo path")
+		}
+	}
+	return []string{repoPath}, false, nil
 }
 
 func extractNPMProjectCandidates(pkg, protectedScope, projectPrefix string) ([]string, bool, error) {

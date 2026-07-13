@@ -22,24 +22,39 @@ func buildAuthenticators(cfg *Config) (map[string]Authenticator, error) {
 }
 
 func authorizeRequest(w http.ResponseWriter, r *http.Request, auths map[string]Authenticator, moduleName string, req AuthRequest) bool {
-	authMethod, password, ok := r.BasicAuth()
+	_, _, ok := authorizeRequestToken(r, moduleName)
 	if ok {
-		return authorizeToken(w, auths, authMethod, password, moduleName, req)
-	}
-
-	if req.Protocol == "npm" {
-		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
-			token := strings.TrimSpace(parts[1])
-			if token != "" {
-				return authorizeToken(w, auths, moduleName, token, moduleName, req)
-			}
-		}
+		return authorizeRequestWithToken(w, auths, moduleName, req, r)
 	}
 
 	http.Error(w, "No username or password provided", http.StatusUnauthorized)
 	return false
+}
+
+func authorizeRequestWithToken(w http.ResponseWriter, auths map[string]Authenticator, moduleName string, req AuthRequest, r *http.Request) bool {
+	authMethod, token, ok := authorizeRequestToken(r, moduleName)
+	if !ok {
+		http.Error(w, "No username or password provided", http.StatusUnauthorized)
+		return false
+	}
+	return authorizeToken(w, auths, authMethod, token, moduleName, req)
+}
+
+func authorizeRequestToken(r *http.Request, moduleName string) (string, string, bool) {
+	authMethod, password, ok := r.BasicAuth()
+	if ok {
+		return authMethod, password, true
+	}
+	if authHeader := strings.TrimSpace(r.Header.Get("Authorization")); authHeader != "" {
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+			token := strings.TrimSpace(parts[1])
+			if token != "" {
+				return moduleName, token, true
+			}
+		}
+	}
+	return "", "", false
 }
 
 func authorizeToken(w http.ResponseWriter, auths map[string]Authenticator, authMethod, password, moduleName string, req AuthRequest) bool {

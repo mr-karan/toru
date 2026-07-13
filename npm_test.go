@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -81,6 +82,8 @@ func TestNPMRewriteRuleTakesPrecedenceOverUpstreamMetadata(t *testing.T) {
 	goPort := freePort(t)
 	npmPort := freePort(t)
 	upstream := newFakeNPMRegistry(t)
+	gitlab := newFakeGitLabRegistry(t, map[string]fakeGitLabRepo{})
+	defer gitlab.Close()
 
 	cfgText := `[server]
 address = ":` + strconv.Itoa(goPort) + `"
@@ -105,6 +108,14 @@ mutable_metadata_ttl = "0s"
 [cache.disk]
 path = "/tmp/toru-cache"
 
+[auth]
+enabled = true
+
+[[auth.modules]]
+name = "static"
+type = "static_token"
+options.token = "secret"
+
 [protocols.go]
 enabled = true
 fetch_timeout = "30s"
@@ -117,23 +128,30 @@ base_url = "http://127.0.0.1:` + strconv.Itoa(npmPort) + `"
 
 [[protocols.npm.rewrite_rules]]
 scope = "@example-commons"
-target_host = "gitlab.example.com"
+target_host = "` + gitlab.Host() + `"
 target_group = "commons"
-auth_module = "gitlab"
+auth_module = "static"
 `
 	proc := startToruProcess(t, cfgText)
 	defer stopCmd(t, proc)
 
 	waitForHTTP200(t, "http://127.0.0.1:"+strconv.Itoa(goPort)+"/metrics", 10*time.Second)
 
-	resp, body, err := getURL("http://127.0.0.1:" + strconv.Itoa(npmPort) + "/%40example-commons%2Ffoo")
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(npmPort)+"/%40example-commons%2Ffoo", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.SetBasicAuth("static", "secret")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request rewritten npm metadata: %v", err)
 	}
 	defer resp.Body.Close()
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	body := string(bodyBytes)
 
-	if resp.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("status=%d body=%q, want 501 so rewrite rule wins over upstream", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status=%d body=%q, want 404 from rewrite resolution so upstream is not consulted", resp.StatusCode, body)
 	}
 }
 
@@ -141,6 +159,8 @@ func TestNPMRewriteRuleRejectsInvalidLeafNameBeforeUpstream(t *testing.T) {
 	goPort := freePort(t)
 	npmPort := freePort(t)
 	upstream := newFakeNPMRegistry(t)
+	gitlab := newFakeGitLabRegistry(t, map[string]fakeGitLabRepo{})
+	defer gitlab.Close()
 
 	cfgText := `[server]
 address = ":` + strconv.Itoa(goPort) + `"
@@ -165,6 +185,14 @@ mutable_metadata_ttl = "0s"
 [cache.disk]
 path = "/tmp/toru-cache"
 
+[auth]
+enabled = true
+
+[[auth.modules]]
+name = "static"
+type = "static_token"
+options.token = "secret"
+
 [protocols.go]
 enabled = true
 fetch_timeout = "30s"
@@ -177,20 +205,27 @@ base_url = "http://127.0.0.1:` + strconv.Itoa(npmPort) + `"
 
 [[protocols.npm.rewrite_rules]]
 scope = "@example-commons"
-target_host = "gitlab.example.com"
+target_host = "` + gitlab.Host() + `"
 target_group = "commons"
-auth_module = "gitlab"
+auth_module = "static"
 `
 	proc := startToruProcess(t, cfgText)
 	defer stopCmd(t, proc)
 
 	waitForHTTP200(t, "http://127.0.0.1:"+strconv.Itoa(goPort)+"/metrics", 10*time.Second)
 
-	resp, body, err := getURL("http://127.0.0.1:" + strconv.Itoa(npmPort) + "/%40example-commons%2F..")
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(npmPort)+"/%40example-commons%2F..", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.SetBasicAuth("static", "secret")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request invalid rewritten npm metadata: %v", err)
 	}
 	defer resp.Body.Close()
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	body := string(bodyBytes)
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%q, want 400 for invalid rewritten package leaf", resp.StatusCode, body)

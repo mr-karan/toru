@@ -131,6 +131,20 @@ func TestStaticTokenAuthenticator(t *testing.T) {
 	}
 }
 
+func TestExtractExplicitRepoPathCandidate(t *testing.T) {
+	t.Parallel()
+	candidates, skip, err := extractExplicitRepoPathCandidate("platform/commons/foo")
+	if err != nil {
+		t.Fatalf("extractExplicitRepoPathCandidate() error = %v", err)
+	}
+	if skip {
+		t.Fatalf("extractExplicitRepoPathCandidate() skip = true, want false")
+	}
+	if len(candidates) != 1 || candidates[0] != "platform/commons/foo" {
+		t.Fatalf("extractExplicitRepoPathCandidate() = %v, want [platform/commons/foo]", candidates)
+	}
+}
+
 func TestNewGitlabAuthenticatorAllowsNPMOnlyConfig(t *testing.T) {
 	t.Parallel()
 	a, err := NewGitlabAuthenticator(map[string]interface{}{

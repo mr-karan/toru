@@ -65,11 +65,22 @@ func (h *npmHandler) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("Received request", "protocol", "npm", "kind", "metadata", "method", r.Method, "path", r.URL.Path, "package", pkg)
 
 	if rule, ok := matchNPMRewriteRule(h.cfg.Protocols.NPM.RewriteRules, pkg); ok {
-		if _, err := repoPathForPackage(rule, pkg); err != nil {
+		repoPath, err := repoPathForPackage(rule, pkg)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		http.Error(w, "npm rewrite rules are recognized but not implemented yet", http.StatusNotImplemented)
+		if !authorizeRequest(w, r, h.authenticators, rule.AuthModule, AuthRequest{Protocol: "npm", Path: r.URL.Path, Resource: pkg, Scope: rule.Scope, RepoPath: repoPath}) {
+			return
+		}
+		body, statusCode, err := h.synthesizeRewrittenMetadata(r, pkg, rule)
+		if err != nil {
+			http.Error(w, err.Error(), statusCode)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		finalSize = len(body)
+		_, _ = w.Write(body)
 		return
 	}
 
@@ -177,11 +188,15 @@ func (h *npmHandler) handleTarball(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("Received request", "protocol", "npm", "kind", "artifact", "method", r.Method, "path", r.URL.Path, "package", pkg, "filename", filename)
 
 	if rule, ok := matchNPMRewriteRule(h.cfg.Protocols.NPM.RewriteRules, pkg); ok {
-		if _, err := repoPathForPackage(rule, pkg); err != nil {
+		repoPath, err := repoPathForPackage(rule, pkg)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		http.Error(w, "npm rewrite rules are recognized but not implemented yet", http.StatusNotImplemented)
+		if !authorizeRequest(w, r, h.authenticators, rule.AuthModule, AuthRequest{Protocol: "npm", Path: r.URL.Path, Resource: pkg, Scope: rule.Scope, RepoPath: repoPath}) {
+			return
+		}
+		http.Error(w, "npm rewrite tarballs are not implemented yet", http.StatusNotImplemented)
 		return
 	}
 
@@ -241,9 +256,16 @@ func (h *npmHandler) handleTarball(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *npmHandler) doUpstreamGet(r *http.Request, upstreamURL string) (*http.Response, []byte, error) {
+	return h.doAuthorizedUpstreamGet(r, upstreamURL, "")
+}
+
+func (h *npmHandler) doAuthorizedUpstreamGet(r *http.Request, upstreamURL, bearerToken string) (*http.Response, []byte, error) {
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
 	if err != nil {
 		return nil, nil, err
+	}
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
 	}
 	resp, err := h.httpClient.Do(req)
 	if err != nil {
