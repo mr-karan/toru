@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -1156,6 +1157,132 @@ auth_module = "static"
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("status=%d body=%q, want 502", resp.StatusCode, string(body))
+	}
+}
+
+func TestNPMRewriteRealClientPNPMSmoke(t *testing.T) {
+	if _, err := exec.LookPath("pnpm"); err != nil {
+		t.Skip("pnpm not available")
+	}
+	goPort := freePort(t)
+	npmPort := freePort(t)
+	upstream := newFakeNPMRegistry(t)
+	gitlab := newFakeGitLabRegistry(t, map[string]fakeGitLabRepo{
+		"commons/foo": {
+			Tags: []string{"v1.0.0"},
+			Archives: map[string]map[string]string{
+				"v1.0.0": {
+					"package.json": `{"name":"@example-commons/foo","version":"1.0.0","main":"index.js"}`,
+					"index.js":     `module.exports = 42`,
+				},
+			},
+		},
+	})
+	defer gitlab.Close()
+
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	cfgText := fmt.Sprintf(`[server]
+address = ":%d"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":%d"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":%d"
+protocols = ["npm"]
+
+[cache]
+enabled = true
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = %q
+
+[auth]
+enabled = true
+
+[[auth.modules]]
+name = "static"
+type = "static_token"
+options.token = "secret"
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = %q
+metadata_ttl = "5m"
+base_url = "http://127.0.0.1:%d"
+
+[[protocols.npm.rewrite_rules]]
+scope = "@example-commons"
+target_host = %q
+target_group = "commons"
+auth_module = "static"
+`, goPort, goPort, npmPort, cacheRoot, upstream.URL, npmPort, gitlab.Host())
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+
+	waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort), 10*time.Second)
+
+	writeProject := func(projectDir string) {
+		t.Helper()
+		if err := os.MkdirAll(projectDir, 0o755); err != nil {
+			t.Fatalf("mkdir project dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(projectDir, "package.json"), []byte(`{"name":"pnpm-rewrite-smoke","version":"1.0.0","private":true}`), 0o644); err != nil {
+			t.Fatalf("write package.json: %v", err)
+		}
+		npmrc := fmt.Sprintf("registry=http://127.0.0.1:%d\n//127.0.0.1:%d/:_authToken=secret\nalways-auth=true\n", npmPort, npmPort)
+		if err := os.WriteFile(filepath.Join(projectDir, ".npmrc"), []byte(npmrc), 0o644); err != nil {
+			t.Fatalf("write .npmrc: %v", err)
+		}
+	}
+	runAdd := func(projectDir, storeDir string) {
+		t.Helper()
+		cmd := exec.Command("pnpm", "add", "@example-commons/foo", "--store-dir", storeDir)
+		cmd.Dir = projectDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("pnpm add failed in %s: %v\n%s", projectDir, err, string(output))
+		}
+		installed, err := os.ReadFile(filepath.Join(projectDir, "node_modules", "@example-commons", "foo", "package.json"))
+		if err != nil {
+			t.Fatalf("read installed package.json in %s: %v\n%s", projectDir, err, string(output))
+		}
+		if !strings.Contains(string(installed), `"name":"@example-commons/foo"`) {
+			t.Fatalf("installed package.json in %s = %q, want rewrite package name", projectDir, string(installed))
+		}
+	}
+
+	projectOne := filepath.Join(t.TempDir(), "pnpm-rewrite-smoke-1")
+	storeOne := filepath.Join(t.TempDir(), "pnpm-store-1")
+	writeProject(projectOne)
+	runAdd(projectOne, storeOne)
+	cacheFile := filepath.Join(cacheRoot, "npm-rewrite", strings.ReplaceAll(gitlab.Host(), ":", "_"), "commons", npmCachePackageKey("@example-commons/foo"), "foo-1.0.0.tgz")
+	if _, err := os.Stat(cacheFile); err != nil {
+		t.Fatalf("rewrite tarball cache file %q missing after first install: %v", cacheFile, err)
+	}
+
+	projectTwo := filepath.Join(t.TempDir(), "pnpm-rewrite-smoke-2")
+	storeTwo := filepath.Join(t.TempDir(), "pnpm-store-2")
+	writeProject(projectTwo)
+	runAdd(projectTwo, storeTwo)
+
+	_, metricsBody, err := getURL(fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort))
+	if err != nil {
+		t.Fatalf("scrape metrics: %v", err)
+	}
+	if !strings.Contains(metricsBody, `toru_cache_hits_by_protocol_total{protocol="npm",class="artifact"}`) {
+		t.Fatalf("expected npm artifact cache hit metric after second install, body=%q", metricsBody)
 	}
 }
 

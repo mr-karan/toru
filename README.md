@@ -25,9 +25,13 @@ Implemented today:
 - scoped and unscoped npm packages
 - npm metadata TTL cache on disk
 - protected npm scopes via auth modules
+- GitLab-backed npm rewrite rules for npm-valid scopes such as `@example-commons/foo`
 
 Not implemented yet:
 - npm publish APIs
+- raw `git+https://...` dependency interception
+- monorepo subdir packaging for rewrite-backed packages
+- arbitrary build steps during rewrite-backed packaging
 
 ## Running with Docker
 
@@ -208,6 +212,32 @@ The npm metadata cache is only active when all of these are true:
 
 If any of those are false, npm metadata is always fetched fresh from upstream.
 
+### npm rewrite rules backed by GitLab repos
+
+Toru can also synthesize npm packages directly from GitLab repos without a publish step.
+This is the npm analogue of Go rewrite rules, but it uses npm-valid scope names.
+
+Example:
+
+```toml
+[[protocols.npm.rewrite_rules]]
+scope = "@example-commons"
+target_host = "gitlab.example.com"
+target_group = "commons"
+auth_module = "gitlab"
+```
+
+With that rule:
+- `@example-commons/foo` maps to `gitlab.example.com/commons/foo`
+- Git tags such as `v1.2.3` or `1.2.3` become installable npm versions
+- Toru synthesizes metadata and tarballs and serves them through the normal npm registry endpoints
+
+v1 limits for rewrite-backed packages:
+- root-level `package.json` is required
+- `package.json.name` must exactly match the public rewritten package name
+- repo contents are packaged as-is; Toru does not run builds
+- raw git dependencies like `git+https://...` are not intercepted by Toru
+
 ### npm protected scopes
 
 You can require auth for specific npm scopes.
@@ -243,6 +273,11 @@ For `gitlab_access_token` modules protecting npm scopes:
 - `options.project_prefix` is optional and maps `@scope/pkg` to `<project_prefix>/pkg`
 - `options.protected_uri` is still used for Go auth, but npm scope protection is driven by `[[protocols.npm.protected_scopes]]`
 
+For `gitlab_access_token` modules used by npm rewrite rules:
+- rewrite access is authorized against the derived GitLab repo path from the rewrite rule
+- `options.project_prefix` is ignored when a derived `RepoPath` is present
+- this preserves the Go-like model where the GitLab token is the source of truth for repo access
+
 ### Client usage
 
 pnpm:
@@ -250,6 +285,18 @@ pnpm:
 ```bash
 pnpm config set registry http://127.0.0.1:8889
 pnpm add is-number
+```
+
+Rewrite-backed package example:
+
+```ini
+registry=https://npm.example.com
+//npm.example.com/:_authToken=<token>
+always-auth=true
+```
+
+```bash
+pnpm add @example-commons/foo
 ```
 
 npm:

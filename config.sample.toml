@@ -53,6 +53,19 @@ upstream = "https://registry.npmjs.org"
 metadata_ttl = "5m" # npm metadata cache is active only for disk cache + metadata_ttl > 0
 base_url = "http://127.0.0.1:8889" # required; for shared host-dispatch listeners, set this to the npm host origin
 
+# Optional GitLab-backed rewrite rules.
+# Example: @example-commons/foo -> gitlab.example.com/commons/foo
+# v1 limits:
+# - root package.json required
+# - package.json.name must exactly match the public rewritten package name
+# - tags like v1.2.3 and 1.2.3 are accepted
+# - no monorepo subdir packaging or build steps
+[[protocols.npm.rewrite_rules]]
+scope = "@example-commons"
+target_host = "gitlab.example.com"
+target_group = "commons"
+auth_module = "gitlab"
+
 # Optional npm protected scope auth.
 # Requests under @toru/* require either:
 # - Basic auth username=static password=secret, or
@@ -62,7 +75,7 @@ scope = "@toru"
 auth_module = "static"
 
 [auth]
-enabled = false
+enabled = true
 
 [[auth.modules]]
 name = "gitlab"
@@ -71,6 +84,7 @@ options.root_url = "https://gitlab.example.com"
 options.protected_uri = "go.example.com" # used for Go auth matching
 # Optional for npm protected scopes mapped into GitLab project prefixes.
 # Npm scope protection itself is configured under [[protocols.npm.protected_scopes]].
+# For npm rewrite rules, the derived repo path is used directly and project_prefix is ignored.
 # options.project_prefix = "team/npm"
 
 [[auth.modules]]
