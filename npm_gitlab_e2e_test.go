@@ -19,10 +19,11 @@ import (
 )
 
 type fakeGitLabRepo struct {
-	Tags        []string
-	TagTargets  map[string]string
-	Archives    map[string]map[string]string
-	ArchiveHits *atomic.Int32
+	Tags          []string
+	TagTargets    map[string]string
+	Archives      map[string]map[string]string
+	ArchiveHits   *atomic.Int32
+	AllowedTokens map[string]bool
 }
 
 type fakeGitLabRegistry struct {
@@ -34,6 +35,25 @@ func newFakeGitLabRegistry(t *testing.T, repos map[string]fakeGitLabRepo) *fakeG
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v4/projects/", func(w http.ResponseWriter, r *http.Request) {
 		trimmed := strings.TrimPrefix(r.URL.Path, "/api/v4/projects/")
+		if !strings.Contains(trimmed, "/repository/") {
+			projectPath, err := url.PathUnescape(strings.Trim(trimmed, "/"))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			repo, ok := repos[projectPath]
+			if !ok {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			if !fakeGitLabTokenAllowed(repo, r) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"path_with_namespace":"`+projectPath+`"}`)
+			return
+		}
 		if strings.HasSuffix(trimmed, "/repository/tags") {
 			projectPath, err := url.PathUnescape(strings.TrimSuffix(trimmed, "/repository/tags"))
 			if err != nil {
@@ -43,6 +63,10 @@ func newFakeGitLabRegistry(t *testing.T, repos map[string]fakeGitLabRepo) *fakeG
 			repo, ok := repos[projectPath]
 			if !ok {
 				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			if !fakeGitLabTokenAllowed(repo, r) {
+				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
 			payload := make([]map[string]string, 0, len(repo.Tags))
@@ -66,6 +90,10 @@ func newFakeGitLabRegistry(t *testing.T, repos map[string]fakeGitLabRepo) *fakeG
 			repo, ok := repos[projectPath]
 			if !ok {
 				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			if !fakeGitLabTokenAllowed(repo, r) {
+				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
 			tag := r.URL.Query().Get("sha")
@@ -93,6 +121,21 @@ func newFakeGitLabRegistry(t *testing.T, repos map[string]fakeGitLabRepo) *fakeG
 
 func (f *fakeGitLabRegistry) Close()       { f.server.Close() }
 func (f *fakeGitLabRegistry) Host() string { return strings.TrimPrefix(f.server.URL, "http://") }
+
+func fakeGitLabTokenAllowed(repo fakeGitLabRepo, r *http.Request) bool {
+	if len(repo.AllowedTokens) == 0 {
+		return true
+	}
+	if token := strings.TrimSpace(r.Header.Get("PRIVATE-TOKEN")); token != "" {
+		return repo.AllowedTokens[token]
+	}
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		token := strings.TrimSpace(auth[len("Bearer "):])
+		return repo.AllowedTokens[token]
+	}
+	return false
+}
 
 func readNPMTarballFiles(body []byte) (map[string]string, error) {
 	gz, err := gzip.NewReader(bytes.NewReader(body))
@@ -143,6 +186,166 @@ func makeGitLabArchive(root string, files map[string]string) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func TestNPMRewriteMetadataUsesGitLabTokenAgainstDerivedRepoPath(t *testing.T) {
+	goPort := freePort(t)
+	npmPort := freePort(t)
+	upstream := newFakeNPMRegistry(t)
+	gitlab := newFakeGitLabRegistry(t, map[string]fakeGitLabRepo{
+		"platform/commons/foo": {
+			Tags: []string{"v1.0.0"},
+			Archives: map[string]map[string]string{
+				"v1.0.0": {"package.json": `{"name":"@example-commons/foo"}`},
+			},
+			AllowedTokens: map[string]bool{"good-token": true},
+		},
+	})
+	defer gitlab.Close()
+
+	cfgText := fmt.Sprintf(`[server]
+address = ":%d"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":%d"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":%d"
+protocols = ["npm"]
+
+[cache]
+enabled = true
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = %q
+
+[auth]
+enabled = true
+
+[[auth.modules]]
+name = "gitlab"
+type = "gitlab_access_token"
+options.root_url = "http://%s"
+options.project_prefix = "wrong/prefix"
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = %q
+metadata_ttl = "5m"
+base_url = "http://127.0.0.1:%d"
+
+[[protocols.npm.rewrite_rules]]
+scope = "@example-commons"
+target_host = %q
+target_group = "platform/commons"
+auth_module = "gitlab"
+`, goPort, goPort, npmPort, filepath.Join(t.TempDir(), "cache"), gitlab.Host(), upstream.URL, npmPort, gitlab.Host())
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+	waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort), 10*time.Second)
+
+	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/%%40example-commons%%2Ffoo", npmPort), nil)
+	req.SetBasicAuth("gitlab", "good-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request derived-repo metadata: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%q, want 200", resp.StatusCode, string(body))
+	}
+}
+
+func TestNPMRewriteMetadataRejectsGitLabTokenWithoutDerivedRepoAccess(t *testing.T) {
+	goPort := freePort(t)
+	npmPort := freePort(t)
+	upstream := newFakeNPMRegistry(t)
+	gitlab := newFakeGitLabRegistry(t, map[string]fakeGitLabRepo{
+		"platform/commons/foo": {
+			Tags: []string{"v1.0.0"},
+			Archives: map[string]map[string]string{
+				"v1.0.0": {"package.json": `{"name":"@example-commons/foo"}`},
+			},
+			AllowedTokens: map[string]bool{"good-token": true},
+		},
+	})
+	defer gitlab.Close()
+
+	cfgText := fmt.Sprintf(`[server]
+address = ":%d"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":%d"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":%d"
+protocols = ["npm"]
+
+[cache]
+enabled = true
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = %q
+
+[auth]
+enabled = true
+
+[[auth.modules]]
+name = "gitlab"
+type = "gitlab_access_token"
+options.root_url = "http://%s"
+options.project_prefix = "wrong/prefix"
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = %q
+metadata_ttl = "5m"
+base_url = "http://127.0.0.1:%d"
+
+[[protocols.npm.rewrite_rules]]
+scope = "@example-commons"
+target_host = %q
+target_group = "platform/commons"
+auth_module = "gitlab"
+`, goPort, goPort, npmPort, filepath.Join(t.TempDir(), "cache"), gitlab.Host(), upstream.URL, npmPort, gitlab.Host())
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+	waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort), 10*time.Second)
+
+	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/%%40example-commons%%2Ffoo", npmPort), nil)
+	req.SetBasicAuth("gitlab", "bad-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request derived-repo metadata: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%q, want 403", resp.StatusCode, string(body))
+	}
 }
 
 func TestNPMRewriteMetadataSynthesizesFromGitLabTags(t *testing.T) {

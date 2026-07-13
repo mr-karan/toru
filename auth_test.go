@@ -131,6 +131,14 @@ func TestStaticTokenAuthenticator(t *testing.T) {
 	}
 }
 
+func TestGitLabAuthenticatorPrefersExplicitRepoPathForNPM(t *testing.T) {
+	t.Parallel()
+	got, skip, err := extractExplicitRepoPathCandidate("platform/commons/foo")
+	if err != nil || skip || len(got) != 1 || got[0] != "platform/commons/foo" {
+		t.Fatalf("extractExplicitRepoPathCandidate() = %v skip=%v err=%v, want [platform/commons/foo] false nil", got, skip, err)
+	}
+}
+
 func TestExtractExplicitRepoPathCandidate(t *testing.T) {
 	t.Parallel()
 	candidates, skip, err := extractExplicitRepoPathCandidate("platform/commons/foo")
