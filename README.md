@@ -10,7 +10,7 @@ _Toru is a multi-protocol dependency proxy. It started as a Go module proxy on t
 - npm registry read/install support for npm and pnpm
 - Single process, single config, multi-listener runtime
 - Disk and S3-backed caching for Go artifacts
-- Disk-backed npm metadata caching and conditional tarball caching when `cache.enabled = true`, `cache.type = "disk"`, and `cache.disk.path` is set
+- npm metadata and tarball caching for disk or S3 cache backends when caching is enabled and configured
 - Go vanity import path rewrites
 - npm tarball URL rewriting back to Toru
 - Protocol-aware auth hooks for protected Go paths and npm scopes
@@ -23,7 +23,7 @@ Implemented today:
 - npm package metadata requests
 - npm tarball requests
 - scoped and unscoped npm packages
-- npm metadata TTL cache on disk
+- npm metadata TTL cache on disk or S3
 - protected npm scopes via auth modules
 - GitLab-backed npm rewrite rules for npm-valid scopes such as `@example-commons/foo`
 
@@ -190,14 +190,14 @@ export GOPROXY=https://gitlab:<access_token>@toru.example.com:9443
 
 ### Registry behavior
 
-Toru serves npm metadata, rewrites every `dist.tarball` URL back to Toru, fetches tarballs from upstream, and uses disk-backed tarball caching only when all of these are true:
+Toru serves npm metadata, rewrites every `dist.tarball` URL back to Toru, fetches tarballs from upstream, and caches tarballs when all of these are true:
 - `cache.enabled = true`
-- `cache.type = "disk"`
-- `cache.disk.path` is set
+- `cache.type = "disk"` with `cache.disk.path` set, or
+- `cache.type = "s3"` with `cache.s3` configured
 
 ### npm metadata cache
 
-npm metadata uses a TTL cache on disk. When a cached entry goes stale and the upstream registry returned an `ETag`, Toru revalidates it with `If-None-Match` and extends freshness deterministically on `304 Not Modified`.
+npm metadata uses a TTL cache on the configured disk or S3 cache backend. When a cached entry goes stale and the upstream registry returned an `ETag`, Toru revalidates it with `If-None-Match` and extends freshness deterministically on `304 Not Modified`.
 
 ```toml
 [protocols.npm]
@@ -206,8 +206,7 @@ metadata_ttl = "5m"
 
 The npm metadata cache is only active when all of these are true:
 - `cache.enabled = true`
-- `cache.type = "disk"`
-- `cache.disk.path` is set
+- either `cache.type = "disk"` with `cache.disk.path` set, or `cache.type = "s3"` with `cache.s3` configured
 - `protocols.npm.metadata_ttl > 0`
 
 If any of those are false, npm metadata is always fetched fresh from upstream.

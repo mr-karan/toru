@@ -30,7 +30,10 @@ func buildListeners(cfg *Config, logger *slog.Logger) ([]runtimeServer, error) {
 	}
 
 	servers := make([]runtimeServer, 0, len(cfg.Listeners))
-	npmHandler := newNPMHandler(cfg, logger, authenticators)
+	npmHandler, err := newNPMHandler(cfg, logger, authenticators)
+	if err != nil {
+		return nil, err
+	}
 	for _, listener := range cfg.Listeners {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/metrics", func(w http.ResponseWriter, req *http.Request) {
