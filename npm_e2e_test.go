@@ -195,7 +195,7 @@ fetch_timeout = "30s"
 [protocols.npm]
 enabled = true
 upstream = %q
-metadata_ttl = "1ms"
+metadata_ttl = "1h"
 base_url = "http://127.0.0.1:%d"
 `, goPort, goPort, npmPort, cacheRoot, upstream.URL, npmPort)
 	proc := startToruProcess(t, cfgText)
@@ -224,7 +224,11 @@ base_url = "http://127.0.0.1:%d"
 		t.Fatalf("etag sidecar = %q, want %q", string(etagBytes), `"toru-fixture-etag"`)
 	}
 
-	time.Sleep(10 * time.Millisecond)
+	expiryPath := filepath.Join(cacheRoot, "npm-meta", "toru-fixture-pkg.expiry")
+	staleExpiry := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	if err := os.WriteFile(expiryPath, []byte(staleExpiry), 0o644); err != nil {
+		t.Fatalf("write stale expiry sidecar: %v", err)
+	}
 
 	resp2, body2, err := getURL(url)
 	if err != nil {
