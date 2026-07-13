@@ -389,66 +389,6 @@ base_url = "http://127.0.0.1:%d"
 	}
 }
 
-func TestNPMMetadataCacheDisabledByNonDiskBackend(t *testing.T) {
-	goPort := freePort(t)
-	npmPort := freePort(t)
-	var metadataHits atomic.Int32
-	upstream := newCountingFakeNPMRegistryWithCounters(t, &metadataHits, nil, nil, nil)
-
-	cfgText := fmt.Sprintf(`[server]
-address = ":%d"
-log_level = "info"
-fetch_timeout = "30s"
-
-[[listeners]]
-name = "go"
-address = ":%d"
-protocols = ["go"]
-
-[[listeners]]
-name = "npm"
-address = ":%d"
-protocols = ["npm"]
-
-[cache]
-enabled = true
-type = "s3"
-mutable_metadata_ttl = "0s"
-
-[cache.disk]
-path = %q
-
-[protocols.go]
-enabled = true
-fetch_timeout = "30s"
-
-[protocols.npm]
-enabled = true
-upstream = %q
-metadata_ttl = "5m"
-base_url = "http://127.0.0.1:%d"
-`, goPort, goPort, npmPort, filepath.Join(t.TempDir(), "cache"), upstream.URL, npmPort)
-	proc := startToruProcess(t, cfgText)
-	defer stopCmd(t, proc)
-
-	waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort), 10*time.Second)
-
-	url := fmt.Sprintf("http://127.0.0.1:%d/toru-fixture-pkg", npmPort)
-	resp1, _, err := getURL(url)
-	if err != nil {
-		t.Fatalf("first metadata request: %v", err)
-	}
-	resp1.Body.Close()
-	resp2, _, err := getURL(url)
-	if err != nil {
-		t.Fatalf("second metadata request: %v", err)
-	}
-	resp2.Body.Close()
-	if hits := metadataHits.Load(); hits != 2 {
-		t.Fatalf("upstream metadata hits with non-disk backend = %d, want 2", hits)
-	}
-}
-
 func TestNPMProtectedScopeRequiresAuth(t *testing.T) {
 	goPort := freePort(t)
 	npmPort := freePort(t)

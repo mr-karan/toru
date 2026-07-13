@@ -114,20 +114,33 @@ func (h *npmHandler) fetchGitLabVersions(r *http.Request, pkg string, rule NPMRe
 
 func (h *npmHandler) fetchGitLabTags(r *http.Request, rule NPMRewriteRule, repoPath, gitlabToken string) ([]gitLabTag, error) {
 	projectPath := url.PathEscape(repoPath)
-	endpoint := h.gitLabRuleBaseURL(rule) + "/api/v4/projects/" + projectPath + "/repository/tags"
-	resp, body, err := h.doAuthorizedUpstreamGet(r, endpoint, gitlabToken)
-	if err != nil {
-		return nil, err
+	baseEndpoint := h.gitLabRuleBaseURL(rule) + "/api/v4/projects/" + projectPath + "/repository/tags"
+	allTags := make([]gitLabTag, 0)
+	nextPageToken := "1"
+	for {
+		endpoint := fmt.Sprintf("%s?page=%s&per_page=100", baseEndpoint, url.QueryEscape(nextPageToken))
+		resp, body, err := h.doAuthorizedUpstreamGet(r, endpoint, gitlabToken)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, gitLabHTTPError{StatusCode: mapGitLabStatus(resp.StatusCode), Message: string(body)}
+		}
+		var tags []gitLabTag
+		if err := json.Unmarshal(body, &tags); err != nil {
+			resp.Body.Close()
+			return nil, err
+		}
+		allTags = append(allTags, tags...)
+		nextPage := strings.TrimSpace(resp.Header.Get("X-Next-Page"))
+		resp.Body.Close()
+		if nextPage == "" || len(tags) == 0 {
+			break
+		}
+		nextPageToken = nextPage
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, gitLabHTTPError{StatusCode: mapGitLabStatus(resp.StatusCode), Message: string(body)}
-	}
-	var tags []gitLabTag
-	if err := json.Unmarshal(body, &tags); err != nil {
-		return nil, err
-	}
-	return tags, nil
+	return allTags, nil
 }
 
 func (h *npmHandler) fetchGitLabManifest(r *http.Request, rule NPMRewriteRule, repoPath, tag, gitlabToken string) (map[string]any, error) {

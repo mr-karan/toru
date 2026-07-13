@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -207,14 +209,18 @@ func (h *npmHandler) handleTarball(w http.ResponseWriter, r *http.Request) {
 		_, gitlabToken, _ = authorizeRequestToken(r, rule.AuthModule)
 		cacheKey := h.rewriteTarballCacheKey(rule, pkg, filename)
 		if cacheKey != "" {
-			if body, _, ok := h.readCacheBytes(cacheKey); ok {
+			if body, _, ok, err := h.readCacheBytes(cacheKey); err == nil && ok {
 				recordProtocolCacheHit("npm", "artifact")
 				w.Header().Set("Content-Type", "application/octet-stream")
 				finalSize = len(body)
 				_, _ = w.Write(body)
 				return
+			} else if err != nil {
+				h.logger.Error("failed to read npm cache body; falling back to uncached fetch", "key", cacheKey, "error", err)
+				recordProtocolCacheError("npm", "artifact")
+			} else {
+				recordProtocolCacheMiss("npm", "artifact")
 			}
-			recordProtocolCacheMiss("npm", "artifact")
 		}
 		body, statusCode, err := h.synthesizeRewrittenTarball(r, pkg, filename, rule, gitlabToken)
 		if err != nil {
@@ -246,14 +252,18 @@ func (h *npmHandler) handleTarball(w http.ResponseWriter, r *http.Request) {
 
 	cacheKey := h.tarballCacheKey(pkg, filename)
 	if cacheKey != "" {
-		if body, _, ok := h.readCacheBytes(cacheKey); ok {
+		if body, _, ok, err := h.readCacheBytes(cacheKey); err == nil && ok {
 			recordProtocolCacheHit("npm", "artifact")
 			w.Header().Set("Content-Type", "application/octet-stream")
 			finalSize = len(body)
 			_, _ = w.Write(body)
 			return
+		} else if err != nil {
+			h.logger.Error("failed to read npm cache body; falling back to uncached fetch", "key", cacheKey, "error", err)
+			recordProtocolCacheError("npm", "artifact")
+		} else {
+			recordProtocolCacheMiss("npm", "artifact")
 		}
-		recordProtocolCacheMiss("npm", "artifact")
 	}
 
 	upstreamURL := strings.TrimSuffix(h.cfg.Protocols.NPM.Upstream, "/") + "/" + pkg + "/-/" + filename
@@ -395,15 +405,18 @@ func (h *npmHandler) rewriteTarballCacheKey(rule NPMRewriteRule, pkg, filename s
 	return filepath.ToSlash(filepath.Join("npm-rewrite", hostKey, groupKey, npmCachePackageKey(pkg), filename))
 }
 
-func (h *npmHandler) readCacheBytes(key string) ([]byte, time.Time, bool) {
+func (h *npmHandler) readCacheBytes(key string) ([]byte, time.Time, bool, error) {
 	if h.npmCache == nil || key == "" {
-		return nil, time.Time{}, false
+		return nil, time.Time{}, false, nil
 	}
 	body, modifiedAt, err := h.npmCache.Get(key)
 	if err != nil {
-		return nil, time.Time{}, false
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, time.Time{}, false, nil
+		}
+		return nil, time.Time{}, false, err
 	}
-	return body, modifiedAt, true
+	return body, modifiedAt, true, nil
 }
 
 func (h *npmHandler) writeCacheBytes(key string, body []byte) error {
@@ -424,11 +437,21 @@ func (h *npmHandler) readMetadataCache(pkg string) (metadataCacheEntry, bool) {
 	if !h.metadataCacheEnabled() {
 		return metadataCacheEntry{}, false
 	}
-	body, modifiedAt, ok := h.readCacheBytes(h.metadataCacheKey(pkg))
+	body, modifiedAt, ok, err := h.readCacheBytes(h.metadataCacheKey(pkg))
+	if err != nil {
+		h.logger.Error("failed to read npm metadata cache body; falling back to upstream fetch", "key", h.metadataCacheKey(pkg), "error", err)
+		recordProtocolCacheError("npm", "metadata")
+		return metadataCacheEntry{}, false
+	}
 	if !ok {
 		return metadataCacheEntry{}, false
 	}
-	etagBytes, _, _ := h.readCacheBytes(h.metadataETagKey(pkg))
+	etagBytes, _, _, err := h.readCacheBytes(h.metadataETagKey(pkg))
+	if err != nil {
+		h.logger.Error("failed to read npm metadata etag cache body; continuing without etag", "key", h.metadataETagKey(pkg), "error", err)
+		recordProtocolCacheError("npm", "metadata")
+		etagBytes = nil
+	}
 	expiresAt := modifiedAt.Add(h.cfg.Protocols.NPM.MetadataTTL)
 	if cachedExpiry, ok := h.readMetadataExpiry(pkg); ok {
 		expiresAt = cachedExpiry
@@ -466,7 +489,12 @@ func (h *npmHandler) writeMetadataCache(pkg string, body []byte, etag string) (b
 }
 
 func (h *npmHandler) readMetadataExpiry(pkg string) (time.Time, bool) {
-	b, _, ok := h.readCacheBytes(h.metadataExpiryKey(pkg))
+	b, _, ok, err := h.readCacheBytes(h.metadataExpiryKey(pkg))
+	if err != nil {
+		h.logger.Error("failed to read npm metadata expiry cache body; treating cache entry as stale", "key", h.metadataExpiryKey(pkg), "error", err)
+		recordProtocolCacheError("npm", "metadata")
+		return time.Time{}, false
+	}
 	if !ok {
 		return time.Time{}, false
 	}

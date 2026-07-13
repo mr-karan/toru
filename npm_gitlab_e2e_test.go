@@ -70,13 +70,36 @@ func newFakeGitLabRegistry(t *testing.T, repos map[string]fakeGitLabRepo) *fakeG
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
-			payload := make([]map[string]string, 0, len(repo.Tags))
-			for _, tag := range repo.Tags {
+			page := 1
+			if raw := strings.TrimSpace(r.URL.Query().Get("page")); raw != "" {
+				if _, err := fmt.Sscanf(raw, "%d", &page); err != nil || page < 1 {
+					page = 1
+				}
+			}
+			perPage := 20
+			if raw := strings.TrimSpace(r.URL.Query().Get("per_page")); raw != "" {
+				if _, err := fmt.Sscanf(raw, "%d", &perPage); err != nil || perPage < 1 {
+					perPage = 20
+				}
+			}
+			start := (page - 1) * perPage
+			if start > len(repo.Tags) {
+				start = len(repo.Tags)
+			}
+			end := start + perPage
+			if end > len(repo.Tags) {
+				end = len(repo.Tags)
+			}
+			payload := make([]map[string]string, 0, end-start)
+			for _, tag := range repo.Tags[start:end] {
 				entry := map[string]string{"name": tag}
 				if target := repo.TagTargets[tag]; target != "" {
 					entry["target"] = target
 				}
 				payload = append(payload, entry)
+			}
+			if end < len(repo.Tags) {
+				w.Header().Set("X-Next-Page", fmt.Sprintf("%d", page+1))
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(payload)
@@ -451,6 +474,102 @@ auth_module = "static"
 	wantTarball := fmt.Sprintf("http://127.0.0.1:%d/%%40example-commons%%2Ffoo/-/foo-1.3.0.tgz", npmPort)
 	if dist["tarball"] != wantTarball {
 		t.Fatalf("tarball=%v, want %q", dist["tarball"], wantTarball)
+	}
+}
+
+func TestNPMRewriteMetadataPaginatesGitLabTags(t *testing.T) {
+	goPort := freePort(t)
+	npmPort := freePort(t)
+	upstream := newFakeNPMRegistry(t)
+	tags := make([]string, 0, 25)
+	archives := make(map[string]map[string]string, 25)
+	for i := 25; i >= 1; i-- {
+		tag := fmt.Sprintf("v1.0.%d", i)
+		tags = append(tags, tag)
+		archives[tag] = map[string]string{
+			"package.json": fmt.Sprintf(`{"name":"@example-commons/foo","version":"1.0.%d"}`, i),
+		}
+	}
+	gitlab := newFakeGitLabRegistry(t, map[string]fakeGitLabRepo{
+		"commons/foo": {
+			Tags:     tags,
+			Archives: archives,
+		},
+	})
+	defer gitlab.Close()
+
+	cfgText := fmt.Sprintf(`[server]
+address = ":%d"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":%d"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":%d"
+protocols = ["npm"]
+
+[cache]
+enabled = true
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = %q
+
+[auth]
+enabled = true
+
+[[auth.modules]]
+name = "static"
+type = "static_token"
+options.token = "secret"
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = %q
+metadata_ttl = "5m"
+base_url = "http://127.0.0.1:%d"
+
+[[protocols.npm.rewrite_rules]]
+scope = "@example-commons"
+target_host = %q
+target_group = "commons"
+auth_module = "static"
+`, goPort, goPort, npmPort, filepath.Join(t.TempDir(), "cache"), upstream.URL, npmPort, gitlab.Host())
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+	waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort), 10*time.Second)
+
+	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/%%40example-commons%%2Ffoo", npmPort), nil)
+	req.SetBasicAuth("static", "secret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request rewritten metadata: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%q, want 200", resp.StatusCode, string(body))
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	versions := doc["versions"].(map[string]any)
+	if len(versions) != 25 {
+		t.Fatalf("versions len=%d, want 25", len(versions))
+	}
+	if _, ok := versions["1.0.1"]; !ok {
+		t.Fatalf("expected paginated older version 1.0.1 to be present")
 	}
 }
 

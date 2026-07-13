@@ -50,7 +50,7 @@ fetch_timeout = "30s"
 [protocols.npm]
 enabled = true
 upstream = "https://registry.npmjs.org"
-metadata_ttl = "5m" # npm metadata cache is active only for disk cache + metadata_ttl > 0
+metadata_ttl = "5m" # npm metadata cache is active for configured disk or S3 cache backends when metadata_ttl > 0
 base_url = "http://127.0.0.1:8889" # required; for shared host-dispatch listeners, set this to the npm host origin
 
 # Optional GitLab-backed rewrite rules.

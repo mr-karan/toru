@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/VictoriaMetrics/metrics"
 )
 
 type fakeNPMCacheStore struct {
@@ -19,6 +21,10 @@ type fakeNPMCacheStore struct {
 	bodies  map[string][]byte
 	modTime map[string]time.Time
 	now     func() time.Time
+}
+
+type failingNPMCacheStore struct {
+	err error
 }
 
 func newFakeNPMCacheStore() *fakeNPMCacheStore {
@@ -54,6 +60,18 @@ func (s *fakeNPMCacheStore) Delete(key string) error {
 	delete(s.bodies, key)
 	delete(s.modTime, key)
 	return nil
+}
+
+func (s *failingNPMCacheStore) Get(string) ([]byte, time.Time, error) {
+	return nil, time.Time{}, s.err
+}
+
+func (s *failingNPMCacheStore) Put(string, []byte) error {
+	return s.err
+}
+
+func (s *failingNPMCacheStore) Delete(string) error {
+	return s.err
 }
 
 func newTestNPMHandler(t *testing.T, upstream string, store npmCacheStore) *npmHandler {
@@ -135,6 +153,43 @@ func TestNewNPMHandlerUsesS3CacheStoreWhenConfigured(t *testing.T) {
 	h := handler.(*npmHandler)
 	if _, ok := h.npmCache.(*s3NPMCacheStore); !ok {
 		t.Fatalf("npm cache store = %T, want *s3NPMCacheStore", h.npmCache)
+	}
+}
+
+func TestNPMMetadataCacheReadErrorsRecordCacheError(t *testing.T) {
+	before := metrics.GetOrCreateCounter(`toru_cache_errors_by_protocol_total{protocol="npm",class="metadata"}`).Get()
+	h := newTestNPMHandler(t, "https://registry.npmjs.org", &failingNPMCacheStore{err: fmt.Errorf("boom")})
+	if _, ok := h.readMetadataCache("toru-fixture-pkg"); ok {
+		t.Fatalf("readMetadataCache ok=true, want false on cache read error")
+	}
+	after := metrics.GetOrCreateCounter(`toru_cache_errors_by_protocol_total{protocol="npm",class="metadata"}`).Get()
+	if after != before+1 {
+		t.Fatalf("metadata cache error counter delta = %v, want 1", after-before)
+	}
+}
+
+func TestNPMArtifactCacheReadErrorsRecordCacheError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/pkg/-/pkg-1.0.0.tgz" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("tarball-body"))
+	}))
+	defer upstream.Close()
+
+	before := metrics.GetOrCreateCounter(`toru_cache_errors_by_protocol_total{protocol="npm",class="artifact"}`).Get()
+	h := newTestNPMHandler(t, upstream.URL, &failingNPMCacheStore{err: fmt.Errorf("boom")})
+	req := httptest.NewRequest(http.MethodGet, "http://toru.test/pkg/-/pkg-1.0.0.tgz", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q, want 200", rr.Code, rr.Body.String())
+	}
+	after := metrics.GetOrCreateCounter(`toru_cache_errors_by_protocol_total{protocol="npm",class="artifact"}`).Get()
+	if after < before+1 {
+		t.Fatalf("artifact cache error counter delta = %v, want at least 1", after-before)
 	}
 }
 
