@@ -61,6 +61,10 @@ func authorizeToken(w http.ResponseWriter, auths map[string]Authenticator, authM
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return false
 	}
+	if req.Protocol == "npm" && skip {
+		http.Error(w, "Unauthorized", http.StatusForbidden)
+		return false
+	}
 	if !hasAccess && !skip {
 		http.Error(w, "Unauthorized", http.StatusForbidden)
 		return false

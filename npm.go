@@ -21,9 +21,10 @@ type npmHandler struct {
 }
 
 type metadataCacheEntry struct {
-	Body  []byte
-	ETag  string
-	Fresh bool
+	Body      []byte
+	ETag      string
+	ExpiresAt time.Time
+	Fresh     bool
 }
 
 func newNPMHandler(cfg *Config, logger *slog.Logger, authenticators map[string]Authenticator) http.Handler {
@@ -64,7 +65,7 @@ func (h *npmHandler) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("Received request", "protocol", "npm", "kind", "metadata", "method", r.Method, "path", r.URL.Path, "package", pkg)
 
 	if rule, ok := matchProtectedScope(h.cfg.Protocols.NPM.ProtectedScopes, pkg); ok {
-		if !authorizeRequest(w, r, h.authenticators, rule.AuthModule, AuthRequest{Protocol: "npm", Path: r.URL.Path, Resource: pkg}) {
+		if !authorizeRequest(w, r, h.authenticators, rule.AuthModule, AuthRequest{Protocol: "npm", Path: r.URL.Path, Resource: pkg, Scope: rule.Scope}) {
 			return
 		}
 	}
@@ -167,7 +168,7 @@ func (h *npmHandler) handleTarball(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("Received request", "protocol", "npm", "kind", "artifact", "method", r.Method, "path", r.URL.Path, "package", pkg, "filename", filename)
 
 	if rule, ok := matchProtectedScope(h.cfg.Protocols.NPM.ProtectedScopes, pkg); ok {
-		if !authorizeRequest(w, r, h.authenticators, rule.AuthModule, AuthRequest{Protocol: "npm", Path: r.URL.Path, Resource: pkg}) {
+		if !authorizeRequest(w, r, h.authenticators, rule.AuthModule, AuthRequest{Protocol: "npm", Path: r.URL.Path, Resource: pkg, Scope: rule.Scope}) {
 			return
 		}
 	}
@@ -283,6 +284,10 @@ func (h *npmHandler) metadataETagPath(pkg string) string {
 	return filepath.Join(h.cfg.Cache.Disk.Path, "npm-meta", npmCachePackageKey(pkg)+".etag")
 }
 
+func (h *npmHandler) metadataExpiryPath(pkg string) string {
+	return filepath.Join(h.cfg.Cache.Disk.Path, "npm-meta", npmCachePackageKey(pkg)+".expiry")
+}
+
 func (h *npmHandler) tarballCachePath(pkg, filename string) string {
 	if !h.artifactCacheEnabled() {
 		return ""
@@ -304,10 +309,15 @@ func (h *npmHandler) readMetadataCache(pkg string) (metadataCacheEntry, bool) {
 		return metadataCacheEntry{}, false
 	}
 	etagBytes, _ := os.ReadFile(h.metadataETagPath(pkg))
+	expiresAt := info.ModTime().Add(h.cfg.Protocols.NPM.MetadataTTL)
+	if cachedExpiry, ok := h.readMetadataExpiry(pkg); ok {
+		expiresAt = cachedExpiry
+	}
 	return metadataCacheEntry{
-		Body:  body,
-		ETag:  string(etagBytes),
-		Fresh: time.Since(info.ModTime()) <= h.cfg.Protocols.NPM.MetadataTTL,
+		Body:      body,
+		ETag:      string(etagBytes),
+		ExpiresAt: expiresAt,
+		Fresh:     time.Now().Before(expiresAt),
 	}, true
 }
 
@@ -333,7 +343,27 @@ func (h *npmHandler) writeMetadataCache(pkg string, body []byte, etag string) (b
 	} else {
 		_ = os.Remove(etagPath)
 	}
+	if err := h.writeMetadataExpiry(pkg, time.Now().Add(h.cfg.Protocols.NPM.MetadataTTL)); err != nil {
+		h.logger.Error("failed to write npm metadata expiry file; serving uncached body", "path", h.metadataExpiryPath(pkg), "error", err)
+		return false, err
+	}
 	return true, nil
+}
+
+func (h *npmHandler) readMetadataExpiry(pkg string) (time.Time, bool) {
+	b, err := os.ReadFile(h.metadataExpiryPath(pkg))
+	if err != nil {
+		return time.Time{}, false
+	}
+	ns, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(b)))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ns, true
+}
+
+func (h *npmHandler) writeMetadataExpiry(pkg string, expiresAt time.Time) error {
+	return os.WriteFile(h.metadataExpiryPath(pkg), []byte(expiresAt.UTC().Format(time.RFC3339Nano)), 0o644)
 }
 
 func (h *npmHandler) revalidateMetadataCache(r *http.Request, pkg string, entry metadataCacheEntry) (metadataCacheEntry, int, error) {
@@ -353,16 +383,11 @@ func (h *npmHandler) revalidateMetadataCache(r *http.Request, pkg string, entry 
 		return metadataCacheEntry{}, 0, err
 	}
 	if resp.StatusCode == http.StatusNotModified {
-		path := h.metadataCachePath(pkg)
-		now := time.Now()
-		if err := os.Chtimes(path, now, now); err != nil {
+		refreshedExpiry := time.Now().Add(h.cfg.Protocols.NPM.MetadataTTL)
+		if err := h.writeMetadataExpiry(pkg, refreshedExpiry); err != nil {
 			return metadataCacheEntry{}, 0, err
 		}
-		etagPath := h.metadataETagPath(pkg)
-		if _, err := os.Stat(etagPath); err == nil {
-			_ = os.Chtimes(etagPath, now, now)
-		}
-		return metadataCacheEntry{Body: entry.Body, ETag: entry.ETag, Fresh: true}, http.StatusNotModified, nil
+		return metadataCacheEntry{Body: entry.Body, ETag: entry.ETag, ExpiresAt: refreshedExpiry, Fresh: true}, http.StatusNotModified, nil
 	}
 	if resp.StatusCode != http.StatusOK {
 		return metadataCacheEntry{Body: body}, resp.StatusCode, nil
@@ -371,7 +396,7 @@ func (h *npmHandler) revalidateMetadataCache(r *http.Request, pkg string, entry 
 	if err != nil {
 		return metadataCacheEntry{}, 0, err
 	}
-	return metadataCacheEntry{Body: body, ETag: resp.Header.Get("ETag"), Fresh: true}, http.StatusOK, nil
+	return metadataCacheEntry{Body: body, ETag: resp.Header.Get("ETag"), ExpiresAt: time.Now().Add(h.cfg.Protocols.NPM.MetadataTTL), Fresh: true}, http.StatusOK, nil
 }
 
 func rewriteNPMMetadataTarballs(body []byte, baseURL, packageName string) ([]byte, error) {

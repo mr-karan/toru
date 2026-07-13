@@ -182,6 +182,71 @@ base_url = "https://npm-toru.example.com"
 	}
 }
 
+func TestNPMEnabledRequiresBaseURL(t *testing.T) {
+	cfgText := `[server]
+address = ":9999"
+log_level = "info"
+
+[[listeners]]
+name = "npm"
+address = ":8081"
+protocols = ["npm"]
+
+[protocols.npm]
+enabled = true
+upstream = "https://registry.npmjs.org"
+metadata_ttl = "5m"
+`
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(path, []byte(cfgText), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+	os.Args = []string{"toru", "--config", path}
+
+	_, err := initConfig(path, "TORU_")
+	if err == nil {
+		t.Fatalf("expected npm config without base_url to be rejected")
+	}
+}
+
+func TestNPMEnabledRequiresAbsoluteBaseURL(t *testing.T) {
+	cfgText := `[server]
+address = ":9999"
+log_level = "info"
+
+[[listeners]]
+name = "npm"
+address = ":8081"
+protocols = ["npm"]
+
+[protocols.npm]
+enabled = true
+upstream = "https://registry.npmjs.org"
+metadata_ttl = "5m"
+base_url = "/relative"
+`
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(path, []byte(cfgText), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+	os.Args = []string{"toru", "--config", path}
+
+	_, err := initConfig(path, "TORU_")
+	if err == nil {
+		t.Fatalf("expected npm config with relative base_url to be rejected")
+	}
+}
+
 func TestSingleListenerHostDispatchRejectsAmbiguousConfig(t *testing.T) {
 	cfgText := `[server]
 address = ":9999"

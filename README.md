@@ -89,7 +89,7 @@ fetch_timeout = "30s"
 enabled = true
 upstream = "https://registry.npmjs.org"
 metadata_ttl = "5m"
-base_url = "http://127.0.0.1:8889"
+base_url = "http://127.0.0.1:8889" # required; used for tarball URL rewrites
 ```
 
 ### Single-listener host-dispatch mode
@@ -122,7 +122,7 @@ fetch_timeout = "30s"
 enabled = true
 upstream = "https://registry.npmjs.org"
 metadata_ttl = "5m"
-base_url = "https://npm.example.com"
+base_url = "https://npm.example.com" # required; must match the npm-facing origin
 ```
 
 Rules for shared listeners:
@@ -193,7 +193,7 @@ Toru serves npm metadata, rewrites every `dist.tarball` URL back to Toru, fetche
 
 ### npm metadata cache
 
-npm metadata uses a TTL cache on disk. When a cached entry goes stale and the upstream registry returned an `ETag`, Toru revalidates it with `If-None-Match` before replacing the cached body.
+npm metadata uses a TTL cache on disk. When a cached entry goes stale and the upstream registry returned an `ETag`, Toru revalidates it with `If-None-Match` and extends freshness deterministically on `304 Not Modified`.
 
 ```toml
 [protocols.npm]
@@ -211,6 +211,8 @@ If any of those are false, npm metadata is always fetched fresh from upstream.
 ### npm protected scopes
 
 You can require auth for specific npm scopes.
+
+`protocols.npm.base_url` is required whenever npm mode is enabled because metadata tarball URLs are rewritten back to Toru.
 
 ```toml
 [auth]
@@ -235,6 +237,11 @@ auth_module = "static"
 Accepted auth forms for protected npm scopes:
 - Basic auth, where username is the auth module name and password is the token
 - `Authorization: Bearer <token>`
+
+For `gitlab_access_token` modules protecting npm scopes:
+- `options.root_url` is required
+- `options.project_prefix` is optional and maps `@scope/pkg` to `<project_prefix>/pkg`
+- `options.protected_uri` is still used for Go auth, but npm scope protection is driven by `[[protocols.npm.protected_scopes]]`
 
 ### Client usage
 

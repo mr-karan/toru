@@ -15,6 +15,7 @@ type AuthRequest struct {
 	Protocol string
 	Path     string
 	Resource string
+	Scope    string
 }
 
 // Authenticator defines protocol-aware authentication.
@@ -30,8 +31,8 @@ var (
 
 // GitLabAuthenticator checks whether a token can access a GitLab project path.
 type GitLabAuthenticator struct {
-	RootURL      string
-	ProtectedURI string
+	RootURL       string
+	ProtectedURI  string
 	ProjectPrefix string
 }
 
@@ -46,7 +47,11 @@ func (g *GitLabAuthenticator) Authenticate(token string, req AuthRequest) (bool,
 	case "go":
 		projectCandidates, skip, err = extractProjectCandidates(req.Path, g.ProtectedURI)
 	case "npm":
-		projectCandidates, skip, err = extractNPMProjectCandidates(req.Resource, g.ProtectedURI, g.ProjectPrefix)
+		protectedScope := req.Scope
+		if protectedScope == "" {
+			protectedScope = g.ProtectedURI
+		}
+		projectCandidates, skip, err = extractNPMProjectCandidates(req.Resource, protectedScope, g.ProjectPrefix)
 	default:
 		return true, false, nil
 	}
@@ -151,10 +156,7 @@ func NewGitlabAuthenticator(opts map[string]interface{}) (*GitLabAuthenticator, 
 	if !ok {
 		return nil, fmt.Errorf("missing root_url")
 	}
-	protectedURI, ok := opts["protected_uri"].(string)
-	if !ok {
-		return nil, fmt.Errorf("missing protected_uri")
-	}
+	protectedURI, _ := opts["protected_uri"].(string)
 	projectPrefix, _ := opts["project_prefix"].(string)
 	return &GitLabAuthenticator{RootURL: url, ProtectedURI: protectedURI, ProjectPrefix: projectPrefix}, nil
 }

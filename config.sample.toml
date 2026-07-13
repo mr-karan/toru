@@ -51,7 +51,7 @@ fetch_timeout = "30s"
 enabled = true
 upstream = "https://registry.npmjs.org"
 metadata_ttl = "5m" # npm metadata cache is active only for disk cache + metadata_ttl > 0
-base_url = "http://127.0.0.1:8889" # for shared host-dispatch listeners, set this to the npm host origin
+base_url = "http://127.0.0.1:8889" # required; for shared host-dispatch listeners, set this to the npm host origin
 
 # Optional npm protected scope auth.
 # Requests under @toru/* require either:
@@ -68,8 +68,9 @@ enabled = false
 name = "gitlab"
 type = "gitlab_access_token"
 options.root_url = "https://gitlab.example.com"
-options.protected_uri = "go.example.com"
+options.protected_uri = "go.example.com" # used for Go auth matching
 # Optional for npm protected scopes mapped into GitLab project prefixes.
+# Npm scope protection itself is configured under [[protocols.npm.protected_scopes]].
 # options.project_prefix = "team/npm"
 
 [[auth.modules]]

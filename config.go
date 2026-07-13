@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -158,6 +159,15 @@ func (c *Config) normalize() {
 }
 
 func (c *Config) validate() error {
+	if c.Protocols.NPM.Enabled {
+		if strings.TrimSpace(c.Protocols.NPM.BaseURL) == "" {
+			return fmt.Errorf("protocols.npm.base_url is required when npm protocol is enabled")
+		}
+		parsedBaseURL, err := url.Parse(c.Protocols.NPM.BaseURL)
+		if err != nil || parsedBaseURL.Scheme == "" || parsedBaseURL.Host == "" {
+			return fmt.Errorf("protocols.npm.base_url must be an absolute URL")
+		}
+	}
 	for _, listener := range c.Listeners {
 		if len(listener.Protocols) == 0 {
 			return fmt.Errorf("listener %q must declare at least one protocol", listener.Name)

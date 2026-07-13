@@ -130,3 +130,20 @@ func TestStaticTokenAuthenticator(t *testing.T) {
 		t.Fatalf("correct token must pass auth, got skip=%v ok=%v err=%v", skip, ok, err)
 	}
 }
+
+func TestNewGitlabAuthenticatorAllowsNPMOnlyConfig(t *testing.T) {
+	t.Parallel()
+	a, err := NewGitlabAuthenticator(map[string]interface{}{
+		"root_url":       "https://gitlab.example.com",
+		"project_prefix": "team/npm",
+	})
+	if err != nil {
+		t.Fatalf("NewGitlabAuthenticator() error = %v", err)
+	}
+	if a.ProtectedURI != "" {
+		t.Fatalf("ProtectedURI = %q, want empty", a.ProtectedURI)
+	}
+	if a.ProjectPrefix != "team/npm" {
+		t.Fatalf("ProjectPrefix = %q, want %q", a.ProjectPrefix, "team/npm")
+	}
+}
