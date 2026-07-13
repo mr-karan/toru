@@ -193,7 +193,7 @@ Toru serves npm metadata, rewrites every `dist.tarball` URL back to Toru, fetche
 
 ### npm metadata cache
 
-npm metadata uses a TTL cache on disk.
+npm metadata uses a TTL cache on disk. When a cached entry goes stale and the upstream registry returned an `ETag`, Toru revalidates it with `If-None-Match` before replacing the cached body.
 
 ```toml
 [protocols.npm]

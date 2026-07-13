@@ -20,6 +20,12 @@ type npmHandler struct {
 	authenticators map[string]Authenticator
 }
 
+type metadataCacheEntry struct {
+	Body  []byte
+	ETag  string
+	Fresh bool
+}
+
 func newNPMHandler(cfg *Config, logger *slog.Logger, authenticators map[string]Authenticator) http.Handler {
 	timeout := cfg.Server.FetchTimeout
 	if timeout == 0 {
@@ -63,17 +69,57 @@ func (h *npmHandler) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if body, ok := h.readFreshMetadataCache(pkg); ok {
-		recordProtocolCacheHit("npm", "metadata")
-		rewritten, err := rewriteNPMMetadataTarballs(body, h.cfg.Protocols.NPM.BaseURL, pkg)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+	if entry, ok := h.readMetadataCache(pkg); ok {
+		if entry.Fresh {
+			recordProtocolCacheHit("npm", "metadata")
+			rewritten, err := rewriteNPMMetadataTarballs(entry.Body, h.cfg.Protocols.NPM.BaseURL, pkg)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			finalSize = len(rewritten)
+			_, _ = w.Write(rewritten)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		finalSize = len(rewritten)
-		_, _ = w.Write(rewritten)
-		return
+
+		if entry.ETag != "" {
+			revalidated, statusCode, err := h.revalidateMetadataCache(r, pkg, entry)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			switch statusCode {
+			case http.StatusNotModified:
+				recordProtocolCacheHit("npm", "metadata")
+				rewritten, err := rewriteNPMMetadataTarballs(revalidated.Body, h.cfg.Protocols.NPM.BaseURL, pkg)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadGateway)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				finalSize = len(rewritten)
+				_, _ = w.Write(rewritten)
+				return
+			case http.StatusOK:
+				recordProtocolCacheMiss("npm", "metadata")
+				rewritten, err := rewriteNPMMetadataTarballs(revalidated.Body, h.cfg.Protocols.NPM.BaseURL, pkg)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadGateway)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				finalSize = len(rewritten)
+				_, _ = w.Write(rewritten)
+				return
+			default:
+				recordProtocolCacheMiss("npm", "metadata")
+				w.WriteHeader(statusCode)
+				finalSize = len(revalidated.Body)
+				_, _ = w.Write(revalidated.Body)
+				return
+			}
+		}
 	}
 
 	recordProtocolCacheMiss("npm", "metadata")
@@ -90,7 +136,7 @@ func (h *npmHandler) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(body)
 		return
 	}
-	wroteMetadataCache, err := h.writeMetadataCache(pkg, body)
+	wroteMetadataCache, err := h.writeMetadataCache(pkg, body, resp.Header.Get("ETag"))
 	if err == nil {
 		if wroteMetadataCache {
 			recordProtocolCacheWrite("npm", "metadata")
@@ -233,6 +279,10 @@ func (h *npmHandler) metadataCachePath(pkg string) string {
 	return filepath.Join(h.cfg.Cache.Disk.Path, "npm-meta", npmCachePackageKey(pkg)+".json")
 }
 
+func (h *npmHandler) metadataETagPath(pkg string) string {
+	return filepath.Join(h.cfg.Cache.Disk.Path, "npm-meta", npmCachePackageKey(pkg)+".etag")
+}
+
 func (h *npmHandler) tarballCachePath(pkg, filename string) string {
 	if !h.artifactCacheEnabled() {
 		return ""
@@ -240,26 +290,28 @@ func (h *npmHandler) tarballCachePath(pkg, filename string) string {
 	return filepath.Join(h.cfg.Cache.Disk.Path, "npm", npmCachePackageKey(pkg), filename)
 }
 
-func (h *npmHandler) readFreshMetadataCache(pkg string) ([]byte, bool) {
+func (h *npmHandler) readMetadataCache(pkg string) (metadataCacheEntry, bool) {
 	if !h.metadataCacheEnabled() {
-		return nil, false
+		return metadataCacheEntry{}, false
 	}
 	path := h.metadataCachePath(pkg)
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, false
-	}
-	if time.Since(info.ModTime()) > h.cfg.Protocols.NPM.MetadataTTL {
-		return nil, false
+		return metadataCacheEntry{}, false
 	}
 	body, err := os.ReadFile(path)
 	if err != nil {
-		return nil, false
+		return metadataCacheEntry{}, false
 	}
-	return body, true
+	etagBytes, _ := os.ReadFile(h.metadataETagPath(pkg))
+	return metadataCacheEntry{
+		Body:  body,
+		ETag:  string(etagBytes),
+		Fresh: time.Since(info.ModTime()) <= h.cfg.Protocols.NPM.MetadataTTL,
+	}, true
 }
 
-func (h *npmHandler) writeMetadataCache(pkg string, body []byte) (bool, error) {
+func (h *npmHandler) writeMetadataCache(pkg string, body []byte, etag string) (bool, error) {
 	if !h.metadataCacheEnabled() {
 		return false, nil
 	}
@@ -272,7 +324,54 @@ func (h *npmHandler) writeMetadataCache(pkg string, body []byte) (bool, error) {
 		h.logger.Error("failed to write npm metadata cache file; serving uncached body", "path", path, "error", err)
 		return false, err
 	}
+	etagPath := h.metadataETagPath(pkg)
+	if etag != "" {
+		if err := os.WriteFile(etagPath, []byte(etag), 0o644); err != nil {
+			h.logger.Error("failed to write npm metadata etag file; serving uncached body", "path", etagPath, "error", err)
+			return false, err
+		}
+	} else {
+		_ = os.Remove(etagPath)
+	}
 	return true, nil
+}
+
+func (h *npmHandler) revalidateMetadataCache(r *http.Request, pkg string, entry metadataCacheEntry) (metadataCacheEntry, int, error) {
+	upstreamURL := strings.TrimSuffix(h.cfg.Protocols.NPM.Upstream, "/") + "/" + encodeNPMPackagePath(pkg)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
+	if err != nil {
+		return metadataCacheEntry{}, 0, err
+	}
+	req.Header.Set("If-None-Match", entry.ETag)
+	resp, err := h.httpClient.Do(req)
+	if err != nil {
+		return metadataCacheEntry{}, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return metadataCacheEntry{}, 0, err
+	}
+	if resp.StatusCode == http.StatusNotModified {
+		path := h.metadataCachePath(pkg)
+		now := time.Now()
+		if err := os.Chtimes(path, now, now); err != nil {
+			return metadataCacheEntry{}, 0, err
+		}
+		etagPath := h.metadataETagPath(pkg)
+		if _, err := os.Stat(etagPath); err == nil {
+			_ = os.Chtimes(etagPath, now, now)
+		}
+		return metadataCacheEntry{Body: entry.Body, ETag: entry.ETag, Fresh: true}, http.StatusNotModified, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return metadataCacheEntry{Body: body}, resp.StatusCode, nil
+	}
+	_, err = h.writeMetadataCache(pkg, body, resp.Header.Get("ETag"))
+	if err != nil {
+		return metadataCacheEntry{}, 0, err
+	}
+	return metadataCacheEntry{Body: body, ETag: resp.Header.Get("ETag"), Fresh: true}, http.StatusOK, nil
 }
 
 func rewriteNPMMetadataTarballs(body []byte, baseURL, packageName string) ([]byte, error) {

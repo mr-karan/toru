@@ -299,25 +299,43 @@ base_url = "http://127.0.0.1:%d"
 `, goPort, goPort, npmPort, filepath.Join(t.TempDir(), "cache"), upstreamURL, npmPort)
 }
 
+type fakeNPMRegistryOptions struct {
+	UnscopedMetadataHits  *atomic.Int32
+	ScopedMetadataHits    *atomic.Int32
+	UnscopedTarballHits   *atomic.Int32
+	ScopedTarballHits     *atomic.Int32
+	MetadataETag          string
+	MetadataBody          string
+	Metadata304OnMatch    bool
+	MetadataStatusOnMatch int
+	MetadataBodyOnMatch   string
+}
+
 func newFakeNPMRegistry(t *testing.T) *httptest.Server {
 	t.Helper()
-	return newCountingFakeNPMRegistryWithCounters(t, nil, nil, nil, nil)
+	return newFakeNPMRegistryWithOptions(t, fakeNPMRegistryOptions{})
 }
 
 func newCountingFakeNPMRegistry(t *testing.T, tarballHits *atomic.Int32) *httptest.Server {
 	t.Helper()
-	return newCountingFakeNPMRegistryWithCounters(t, nil, nil, tarballHits, tarballHits)
+	return newFakeNPMRegistryWithOptions(t, fakeNPMRegistryOptions{UnscopedTarballHits: tarballHits, ScopedTarballHits: tarballHits})
 }
 
 func newCountingFakeNPMRegistryWithCounters(t *testing.T, unscopedMetadataHits, scopedMetadataHits, unscopedTarballHits, scopedTarballHits *atomic.Int32) *httptest.Server {
 	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/toru-fixture-pkg", func(w http.ResponseWriter, r *http.Request) {
-		if unscopedMetadataHits != nil {
-			unscopedMetadataHits.Add(1)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{
+	return newFakeNPMRegistryWithOptions(t, fakeNPMRegistryOptions{
+		UnscopedMetadataHits: unscopedMetadataHits,
+		ScopedMetadataHits:   scopedMetadataHits,
+		UnscopedTarballHits:  unscopedTarballHits,
+		ScopedTarballHits:    scopedTarballHits,
+	})
+}
+
+func newFakeNPMRegistryWithOptions(t *testing.T, opts fakeNPMRegistryOptions) *httptest.Server {
+	t.Helper()
+	metadataBody := opts.MetadataBody
+	if metadataBody == "" {
+		metadataBody = `{
 			"name":"toru-fixture-pkg",
 			"dist-tags":{"latest":"1.0.0"},
 			"versions":{
@@ -330,11 +348,35 @@ func newCountingFakeNPMRegistryWithCounters(t *testing.T, unscopedMetadataHits, 
 					}
 				}
 			}
-		}`)
+		}`
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/toru-fixture-pkg", func(w http.ResponseWriter, r *http.Request) {
+		if opts.UnscopedMetadataHits != nil {
+			opts.UnscopedMetadataHits.Add(1)
+		}
+		if opts.MetadataETag != "" {
+			w.Header().Set("ETag", opts.MetadataETag)
+			if r.Header.Get("If-None-Match") == opts.MetadataETag {
+				if opts.MetadataStatusOnMatch != 0 {
+					w.WriteHeader(opts.MetadataStatusOnMatch)
+					if opts.MetadataBodyOnMatch != "" {
+						_, _ = io.WriteString(w, opts.MetadataBodyOnMatch)
+					}
+					return
+				}
+				if opts.Metadata304OnMatch {
+					w.WriteHeader(http.StatusNotModified)
+					return
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, metadataBody)
 	})
 	scopedMetadataHandler := func(w http.ResponseWriter, r *http.Request) {
-		if scopedMetadataHits != nil {
-			scopedMetadataHits.Add(1)
+		if opts.ScopedMetadataHits != nil {
+			opts.ScopedMetadataHits.Add(1)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{
@@ -355,15 +397,15 @@ func newCountingFakeNPMRegistryWithCounters(t *testing.T, unscopedMetadataHits, 
 	mux.HandleFunc("/@toru/fixture-scoped", scopedMetadataHandler)
 	mux.HandleFunc("/%40toru%2Ffixture-scoped", scopedMetadataHandler)
 	mux.HandleFunc("/toru-fixture-pkg/-/toru-fixture-pkg-1.0.0.tgz", func(w http.ResponseWriter, r *http.Request) {
-		if unscopedTarballHits != nil {
-			unscopedTarballHits.Add(1)
+		if opts.UnscopedTarballHits != nil {
+			opts.UnscopedTarballHits.Add(1)
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = io.WriteString(w, "fake-tgz-unscoped")
 	})
 	scopedTarballHandler := func(w http.ResponseWriter, r *http.Request) {
-		if scopedTarballHits != nil {
-			scopedTarballHits.Add(1)
+		if opts.ScopedTarballHits != nil {
+			opts.ScopedTarballHits.Add(1)
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = io.WriteString(w, "fake-tgz-scoped")

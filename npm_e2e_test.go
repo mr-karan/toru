@@ -154,6 +154,177 @@ base_url = "http://127.0.0.1:%d"
 	}
 }
 
+func TestNPMMetadataStaleRevalidatesWithETag304(t *testing.T) {
+	goPort := freePort(t)
+	npmPort := freePort(t)
+	var metadataHits atomic.Int32
+	upstream := newFakeNPMRegistryWithOptions(t, fakeNPMRegistryOptions{
+		UnscopedMetadataHits: &metadataHits,
+		MetadataETag:         `"toru-fixture-etag"`,
+		Metadata304OnMatch:   true,
+	})
+
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	cfgText := fmt.Sprintf(`[server]
+address = ":%d"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":%d"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":%d"
+protocols = ["npm"]
+
+[cache]
+enabled = true
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = %q
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = %q
+metadata_ttl = "1ms"
+base_url = "http://127.0.0.1:%d"
+`, goPort, goPort, npmPort, cacheRoot, upstream.URL, npmPort)
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+
+	waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort), 10*time.Second)
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/toru-fixture-pkg", npmPort)
+	resp1, body1, err := getURL(url)
+	if err != nil {
+		t.Fatalf("first metadata request: %v", err)
+	}
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("first metadata status=%d body=%q, want 200", resp1.StatusCode, body1)
+	}
+	if hits := metadataHits.Load(); hits != 1 {
+		t.Fatalf("upstream metadata hits after first request = %d, want 1", hits)
+	}
+
+	etagBytes, err := os.ReadFile(filepath.Join(cacheRoot, "npm-meta", "toru-fixture-pkg.etag"))
+	if err != nil {
+		t.Fatalf("read etag sidecar: %v", err)
+	}
+	if string(etagBytes) != `"toru-fixture-etag"` {
+		t.Fatalf("etag sidecar = %q, want %q", string(etagBytes), `"toru-fixture-etag"`)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+
+	resp2, body2, err := getURL(url)
+	if err != nil {
+		t.Fatalf("second metadata request: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("second metadata status=%d body=%q, want 200", resp2.StatusCode, body2)
+	}
+	if hits := metadataHits.Load(); hits != 2 {
+		t.Fatalf("upstream metadata hits after 304 revalidation = %d, want 2", hits)
+	}
+
+	resp3, body3, err := getURL(url)
+	if err != nil {
+		t.Fatalf("third metadata request: %v", err)
+	}
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusOK {
+		t.Fatalf("third metadata status=%d body=%q, want 200", resp3.StatusCode, body3)
+	}
+	if hits := metadataHits.Load(); hits != 2 {
+		t.Fatalf("upstream metadata hits after immediate post-304 cache hit = %d, want still 2", hits)
+	}
+}
+
+func TestNPMMetadataStaleRevalidationPropagatesUpstreamErrorsWithoutRefetch(t *testing.T) {
+	goPort := freePort(t)
+	npmPort := freePort(t)
+	var metadataHits atomic.Int32
+	upstream := newFakeNPMRegistryWithOptions(t, fakeNPMRegistryOptions{
+		UnscopedMetadataHits:  &metadataHits,
+		MetadataETag:          `"toru-fixture-etag"`,
+		MetadataStatusOnMatch: http.StatusNotFound,
+	})
+
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	cfgText := fmt.Sprintf(`[server]
+address = ":%d"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":%d"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":%d"
+protocols = ["npm"]
+
+[cache]
+enabled = true
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = %q
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = %q
+metadata_ttl = "1ms"
+base_url = "http://127.0.0.1:%d"
+`, goPort, goPort, npmPort, cacheRoot, upstream.URL, npmPort)
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+
+	waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort), 10*time.Second)
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/toru-fixture-pkg", npmPort)
+	resp1, body1, err := getURL(url)
+	if err != nil {
+		t.Fatalf("first metadata request: %v", err)
+	}
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("first metadata status=%d body=%q, want 200", resp1.StatusCode, body1)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+
+	resp2, body2, err := getURL(url)
+	if err != nil {
+		t.Fatalf("second metadata request: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("second metadata status=%d body=%q, want 404", resp2.StatusCode, body2)
+	}
+	if hits := metadataHits.Load(); hits != 2 {
+		t.Fatalf("upstream metadata hits after stale error revalidation = %d, want 2", hits)
+	}
+}
+
 func TestNPMMetadataCacheDisabledByCacheConfig(t *testing.T) {
 	goPort := freePort(t)
 	npmPort := freePort(t)
