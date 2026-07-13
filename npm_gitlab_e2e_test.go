@@ -10,16 +10,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 type fakeGitLabRepo struct {
-	Tags       []string
-	TagTargets map[string]string
-	Archives   map[string]map[string]string
+	Tags        []string
+	TagTargets  map[string]string
+	Archives    map[string]map[string]string
+	ArchiveHits *atomic.Int32
 }
 
 type fakeGitLabRegistry struct {
@@ -71,6 +74,9 @@ func newFakeGitLabRegistry(t *testing.T, repos map[string]fakeGitLabRepo) *fakeG
 				http.Error(w, "archive not found", http.StatusNotFound)
 				return
 			}
+			if repo.ArchiveHits != nil {
+				repo.ArchiveHits.Add(1)
+			}
 			archive, err := makeGitLabArchive(filepath.Base(projectPath)+"-"+tag, files)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -87,6 +93,34 @@ func newFakeGitLabRegistry(t *testing.T, repos map[string]fakeGitLabRepo) *fakeG
 
 func (f *fakeGitLabRegistry) Close()       { f.server.Close() }
 func (f *fakeGitLabRegistry) Host() string { return strings.TrimPrefix(f.server.URL, "http://") }
+
+func readNPMTarballFiles(body []byte) (map[string]string, error) {
+	gz, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	files := map[string]string{}
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
+			continue
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			return nil, err
+		}
+		files[hdr.Name] = string(data)
+	}
+	return files, nil
+}
 
 func makeGitLabArchive(root string, files map[string]string) ([]byte, error) {
 	var buf bytes.Buffer
@@ -547,6 +581,299 @@ auth_module = "static"
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("status=%d body=%q, want 502", resp.StatusCode, string(body))
+	}
+}
+
+func TestNPMRewriteTarballSynthesizesPackagePrefixAndCaches(t *testing.T) {
+	goPort := freePort(t)
+	npmPort := freePort(t)
+	upstream := newFakeNPMRegistry(t)
+	var archiveHits atomic.Int32
+	gitlab := newFakeGitLabRegistry(t, map[string]fakeGitLabRepo{
+		"commons/foo": {
+			Tags: []string{"v1.2.0"},
+			Archives: map[string]map[string]string{
+				"v1.2.0": {
+					"package.json": `{"name":"@example-commons/foo","main":"index.js"}`,
+					"index.js":     `module.exports = 42`,
+				},
+			},
+			ArchiveHits: &archiveHits,
+		},
+	})
+	defer gitlab.Close()
+
+	cfgText := fmt.Sprintf(`[server]
+address = ":%d"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":%d"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":%d"
+protocols = ["npm"]
+
+[cache]
+enabled = true
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = %q
+
+[auth]
+enabled = true
+
+[[auth.modules]]
+name = "static"
+type = "static_token"
+options.token = "secret"
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = %q
+metadata_ttl = "5m"
+base_url = "http://127.0.0.1:%d"
+
+[[protocols.npm.rewrite_rules]]
+scope = "@example-commons"
+target_host = %q
+target_group = "commons"
+auth_module = "static"
+`, goPort, goPort, npmPort, filepath.Join(t.TempDir(), "cache"), upstream.URL, npmPort, gitlab.Host())
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+
+	waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort), 10*time.Second)
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/%%40example-commons%%2Ffoo/-/foo-1.2.0.tgz", npmPort)
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req.SetBasicAuth("static", "secret")
+	resp1, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("first tarball request: %v", err)
+	}
+	body1, _ := io.ReadAll(resp1.Body)
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("first tarball status=%d body=%q, want 200", resp1.StatusCode, string(body1))
+	}
+	if hits := archiveHits.Load(); hits != 1 {
+		t.Fatalf("archive hits after first request = %d, want 1", hits)
+	}
+	files, err := readNPMTarballFiles(body1)
+	if err != nil {
+		t.Fatalf("read synthesized tarball: %v", err)
+	}
+	if _, ok := files["package/package.json"]; !ok {
+		t.Fatalf("expected package/package.json in synthesized tarball, files=%v", files)
+	}
+	if _, ok := files["package/index.js"]; !ok {
+		t.Fatalf("expected package/index.js in synthesized tarball, files=%v", files)
+	}
+
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("second tarball request: %v", err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("second tarball status=%d body=%q, want 200", resp2.StatusCode, string(body2))
+	}
+	if hits := archiveHits.Load(); hits != 1 {
+		t.Fatalf("archive hits after cached request = %d, want still 1", hits)
+	}
+}
+
+func TestNPMRewriteTarballFailsWhenRootPackageJSONMissing(t *testing.T) {
+	goPort := freePort(t)
+	npmPort := freePort(t)
+	upstream := newFakeNPMRegistry(t)
+	gitlab := newFakeGitLabRegistry(t, map[string]fakeGitLabRepo{
+		"commons/missing-manifest": {
+			Tags: []string{"v1.0.0"},
+			Archives: map[string]map[string]string{
+				"v1.0.0": {"README.md": "hello"},
+			},
+		},
+	})
+	defer gitlab.Close()
+
+	cfgText := fmt.Sprintf(`[server]
+address = ":%d"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":%d"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":%d"
+protocols = ["npm"]
+
+[cache]
+enabled = true
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = %q
+
+[auth]
+enabled = true
+
+[[auth.modules]]
+name = "static"
+type = "static_token"
+options.token = "secret"
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = %q
+metadata_ttl = "5m"
+base_url = "http://127.0.0.1:%d"
+
+[[protocols.npm.rewrite_rules]]
+scope = "@example-commons"
+target_host = %q
+target_group = "commons"
+auth_module = "static"
+`, goPort, goPort, npmPort, filepath.Join(t.TempDir(), "cache"), upstream.URL, npmPort, gitlab.Host())
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+
+	waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort), 10*time.Second)
+
+	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/%%40example-commons%%2Fmissing-manifest/-/missing-manifest-1.0.0.tgz", npmPort), nil)
+	req.SetBasicAuth("static", "secret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request missing-manifest tarball: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%q, want 502", resp.StatusCode, string(body))
+	}
+}
+
+func TestNPMRewriteTarballUsesSeparateCacheNamespaceFromUpstream(t *testing.T) {
+	goPort := freePort(t)
+	npmPort := freePort(t)
+	upstream := newFakeNPMRegistry(t)
+	var archiveHits atomic.Int32
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	gitlab := newFakeGitLabRegistry(t, map[string]fakeGitLabRepo{
+		"commons/foo": {
+			Tags: []string{"v1.2.0"},
+			Archives: map[string]map[string]string{
+				"v1.2.0": {
+					"package.json": `{"name":"@example-commons/foo","main":"index.js"}`,
+					"index.js":     `module.exports = 42`,
+				},
+			},
+			ArchiveHits: &archiveHits,
+		},
+	})
+	defer gitlab.Close()
+
+	if err := os.MkdirAll(filepath.Join(cacheRoot, "npm", "%40example-commons%2Ffoo"), 0o755); err != nil {
+		t.Fatalf("mkdir upstream cache path: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheRoot, "npm", "%40example-commons%2Ffoo", "foo-1.2.0.tgz"), []byte("upstream-body"), 0o644); err != nil {
+		t.Fatalf("seed upstream cache path: %v", err)
+	}
+
+	cfgText := fmt.Sprintf(`[server]
+address = ":%d"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":%d"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":%d"
+protocols = ["npm"]
+
+[cache]
+enabled = true
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = %q
+
+[auth]
+enabled = true
+
+[[auth.modules]]
+name = "static"
+type = "static_token"
+options.token = "secret"
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = %q
+metadata_ttl = "5m"
+base_url = "http://127.0.0.1:%d"
+
+[[protocols.npm.rewrite_rules]]
+scope = "@example-commons"
+target_host = %q
+target_group = "commons"
+auth_module = "static"
+`, goPort, goPort, npmPort, cacheRoot, upstream.URL, npmPort, gitlab.Host())
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+
+	waitForHTTP200(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", goPort), 10*time.Second)
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/%%40example-commons%%2Ffoo/-/foo-1.2.0.tgz", npmPort)
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req.SetBasicAuth("static", "secret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request rewrite tarball: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%q, want 200", resp.StatusCode, string(body))
+	}
+	if string(body) == "upstream-body" {
+		t.Fatalf("rewrite tarball served stale upstream cache body")
+	}
+	if hits := archiveHits.Load(); hits != 1 {
+		t.Fatalf("archive hits after rewrite tarball request = %d, want 1", hits)
+	}
+	hostKey := strings.ReplaceAll(gitlab.Host(), ":", "_")
+	if _, err := os.Stat(filepath.Join(cacheRoot, "npm-rewrite", hostKey, "commons", npmCachePackageKey("@example-commons/foo"), "foo-1.2.0.tgz")); err != nil {
+		t.Fatalf("expected rewrite cache artifact in isolated namespace: %v", err)
 	}
 }
 

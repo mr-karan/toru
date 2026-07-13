@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -130,6 +131,14 @@ func (h *npmHandler) fetchGitLabTags(r *http.Request, rule NPMRewriteRule, repoP
 }
 
 func (h *npmHandler) fetchGitLabManifest(r *http.Request, rule NPMRewriteRule, repoPath, tag, gitlabToken string) (map[string]any, error) {
+	body, err := h.fetchGitLabArchive(r, rule, repoPath, tag, gitlabToken)
+	if err != nil {
+		return nil, err
+	}
+	return extractRootPackageJSON(body)
+}
+
+func (h *npmHandler) fetchGitLabArchive(r *http.Request, rule NPMRewriteRule, repoPath, tag, gitlabToken string) ([]byte, error) {
 	projectPath := url.PathEscape(repoPath)
 	endpoint := h.gitLabRuleBaseURL(rule) + "/api/v4/projects/" + projectPath + "/repository/archive.tar.gz?sha=" + url.QueryEscape(tag)
 	resp, body, err := h.doAuthorizedUpstreamGet(r, endpoint, gitlabToken)
@@ -140,11 +149,11 @@ func (h *npmHandler) fetchGitLabManifest(r *http.Request, rule NPMRewriteRule, r
 	if resp.StatusCode != http.StatusOK {
 		return nil, gitLabHTTPError{StatusCode: mapGitLabStatus(resp.StatusCode), Message: string(body)}
 	}
-	return extractRootPackageJSON(body)
+	return body, nil
 }
 
 func extractRootPackageJSON(body []byte) (map[string]any, error) {
-	gz, err := gzip.NewReader(strings.NewReader(string(body)))
+	gz, err := gzip.NewReader(bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -198,6 +207,77 @@ func normalizeGitTagVersion(tag string) (string, bool) {
 		return "", false
 	}
 	return version, true
+}
+
+func (h *npmHandler) synthesizeRewrittenTarball(r *http.Request, pkg, filename string, rule NPMRewriteRule, gitlabToken string) ([]byte, int, error) {
+	repoPath, err := repoPathForPackage(rule, pkg)
+	if err != nil {
+		return nil, http.StatusBadRequest, err
+	}
+	version, err := rewrittenTarballVersion(pkg, filename)
+	if err != nil {
+		return nil, http.StatusBadRequest, err
+	}
+	tag, err := h.resolveGitLabVersionTag(r, rule, repoPath, version, gitlabToken)
+	if err != nil {
+		var httpErr gitLabHTTPError
+		if ok := errorAs(err, &httpErr); ok {
+			return nil, httpErr.StatusCode, fmt.Errorf("%s", httpErr.Message)
+		}
+		return nil, http.StatusBadGateway, err
+	}
+	archive, err := h.fetchGitLabArchive(r, rule, repoPath, tag, gitlabToken)
+	if err != nil {
+		var httpErr gitLabHTTPError
+		if ok := errorAs(err, &httpErr); ok {
+			return nil, httpErr.StatusCode, fmt.Errorf("%s", httpErr.Message)
+		}
+		return nil, http.StatusBadGateway, err
+	}
+	body, err := synthesizeNPMTarballFromGitLabArchive(pkg, archive)
+	if err != nil {
+		return nil, http.StatusBadGateway, err
+	}
+	return body, http.StatusOK, nil
+}
+
+func (h *npmHandler) resolveGitLabVersionTag(r *http.Request, rule NPMRewriteRule, repoPath, requestedVersion, gitlabToken string) (string, error) {
+	tags, err := h.fetchGitLabTags(r, rule, repoPath, gitlabToken)
+	if err != nil {
+		return "", err
+	}
+	normalizedRequested, ok := normalizeGitTagVersion(requestedVersion)
+	if !ok {
+		return "", fmt.Errorf("invalid requested version %q", requestedVersion)
+	}
+	chosenTag := ""
+	chosenTarget := ""
+	for _, tag := range tags {
+		normalizedTag, ok := normalizeGitTagVersion(tag.Name)
+		if !ok || normalizedTag != normalizedRequested {
+			continue
+		}
+		if chosenTag == "" {
+			chosenTag = tag.Name
+			chosenTarget = tag.Target
+			if chosenTarget == "" {
+				chosenTarget = tag.Name
+			}
+			continue
+		}
+		candidateTarget := tag.Target
+		if candidateTarget == "" {
+			candidateTarget = tag.Name
+		}
+		if chosenTarget != candidateTarget {
+			return "", fmt.Errorf("ambiguous tags for version %s: %s, %s", normalizedRequested, chosenTag, tag.Name)
+		}
+		chosenTag = preferredGitTag(chosenTag, tag.Name, normalizedRequested)
+	}
+	if chosenTag == "" {
+		return "", gitLabHTTPError{StatusCode: http.StatusNotFound, Message: fmt.Sprintf("version %s not found for %s", requestedVersion, repoPath)}
+	}
+	return chosenTag, nil
 }
 
 func (h *npmHandler) gitLabRuleBaseURL(rule NPMRewriteRule) string {

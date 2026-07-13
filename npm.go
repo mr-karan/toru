@@ -196,7 +196,46 @@ func (h *npmHandler) handleTarball(w http.ResponseWriter, r *http.Request) {
 		if !authorizeRequest(w, r, h.authenticators, rule.AuthModule, AuthRequest{Protocol: "npm", Path: r.URL.Path, Resource: pkg, Scope: rule.Scope, RepoPath: repoPath}) {
 			return
 		}
-		http.Error(w, "npm rewrite tarballs are not implemented yet", http.StatusNotImplemented)
+		gitlabToken := ""
+		_, gitlabToken, _ = authorizeRequestToken(r, rule.AuthModule)
+		cachePath := h.rewriteTarballCachePath(rule, pkg, filename)
+		if cachePath != "" {
+			if body, err := os.ReadFile(cachePath); err == nil {
+				recordProtocolCacheHit("npm", "artifact")
+				w.Header().Set("Content-Type", "application/octet-stream")
+				finalSize = len(body)
+				_, _ = w.Write(body)
+				return
+			}
+			recordProtocolCacheMiss("npm", "artifact")
+		}
+		body, statusCode, err := h.synthesizeRewrittenTarball(r, pkg, filename, rule, gitlabToken)
+		if err != nil {
+			http.Error(w, err.Error(), statusCode)
+			return
+		}
+		if cachePath != "" {
+			if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+				h.logger.Error("failed to create npm cache directory; serving uncached body", "path", filepath.Dir(cachePath), "error", err)
+				recordProtocolCacheError("npm", "artifact")
+				w.Header().Set("Content-Type", "application/octet-stream")
+				finalSize = len(body)
+				_, _ = w.Write(body)
+				return
+			}
+			if err := os.WriteFile(cachePath, body, 0o644); err != nil {
+				h.logger.Error("failed to write npm cache file; serving uncached body", "path", cachePath, "error", err)
+				recordProtocolCacheError("npm", "artifact")
+				w.Header().Set("Content-Type", "application/octet-stream")
+				finalSize = len(body)
+				_, _ = w.Write(body)
+				return
+			}
+			recordProtocolCacheWrite("npm", "artifact")
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		finalSize = len(body)
+		_, _ = w.Write(body)
 		return
 	}
 
@@ -333,6 +372,16 @@ func (h *npmHandler) tarballCachePath(pkg, filename string) string {
 		return ""
 	}
 	return filepath.Join(h.cfg.Cache.Disk.Path, "npm", npmCachePackageKey(pkg), filename)
+}
+
+func (h *npmHandler) rewriteTarballCachePath(rule NPMRewriteRule, pkg, filename string) string {
+	if !h.artifactCacheEnabled() {
+		return ""
+	}
+	hostKey := strings.TrimSpace(rule.TargetHost)
+	hostKey = strings.ReplaceAll(hostKey, ":", "_")
+	groupKey := strings.ReplaceAll(normalizeTargetGroup(rule.TargetGroup), "/", "__")
+	return filepath.Join(h.cfg.Cache.Disk.Path, "npm-rewrite", hostKey, groupKey, npmCachePackageKey(pkg), filename)
 }
 
 func (h *npmHandler) readMetadataCache(pkg string) (metadataCacheEntry, bool) {
