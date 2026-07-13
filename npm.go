@@ -64,6 +64,15 @@ func (h *npmHandler) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	}
 	h.logger.Info("Received request", "protocol", "npm", "kind", "metadata", "method", r.Method, "path", r.URL.Path, "package", pkg)
 
+	if rule, ok := matchNPMRewriteRule(h.cfg.Protocols.NPM.RewriteRules, pkg); ok {
+		if _, err := repoPathForPackage(rule, pkg); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "npm rewrite rules are recognized but not implemented yet", http.StatusNotImplemented)
+		return
+	}
+
 	if rule, ok := matchProtectedScope(h.cfg.Protocols.NPM.ProtectedScopes, pkg); ok {
 		if !authorizeRequest(w, r, h.authenticators, rule.AuthModule, AuthRequest{Protocol: "npm", Path: r.URL.Path, Resource: pkg, Scope: rule.Scope}) {
 			return
@@ -166,6 +175,15 @@ func (h *npmHandler) handleTarball(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.logger.Info("Received request", "protocol", "npm", "kind", "artifact", "method", r.Method, "path", r.URL.Path, "package", pkg, "filename", filename)
+
+	if rule, ok := matchNPMRewriteRule(h.cfg.Protocols.NPM.RewriteRules, pkg); ok {
+		if _, err := repoPathForPackage(rule, pkg); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "npm rewrite rules are recognized but not implemented yet", http.StatusNotImplemented)
+		return
+	}
 
 	if rule, ok := matchProtectedScope(h.cfg.Protocols.NPM.ProtectedScopes, pkg); ok {
 		if !authorizeRequest(w, r, h.authenticators, rule.AuthModule, AuthRequest{Protocol: "npm", Path: r.URL.Path, Resource: pkg, Scope: rule.Scope}) {

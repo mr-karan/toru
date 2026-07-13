@@ -137,6 +137,48 @@ base_url = "https://npm-toru.example.com"
 	}
 }
 
+func TestNPMRewriteRulesParse(t *testing.T) {
+	cfgText := `[server]
+address = ":9999"
+log_level = "info"
+
+[[listeners]]
+name = "npm"
+address = ":8081"
+protocols = ["npm"]
+
+[protocols.npm]
+enabled = true
+upstream = "https://registry.npmjs.org"
+metadata_ttl = "5m"
+base_url = "https://npm.example.com"
+
+[[protocols.npm.rewrite_rules]]
+scope = "@example-commons"
+target_host = "gitlab.example.com"
+target_group = "commons"
+auth_module = "gitlab"
+`
+
+	cfg := loadConfigFromText(t, cfgText)
+	if len(cfg.Protocols.NPM.RewriteRules) != 1 {
+		t.Fatalf("expected 1 npm rewrite rule, got %d", len(cfg.Protocols.NPM.RewriteRules))
+	}
+	rule := cfg.Protocols.NPM.RewriteRules[0]
+	if rule.Scope != "@example-commons" {
+		t.Fatalf("rewrite scope = %q, want %q", rule.Scope, "@example-commons")
+	}
+	if rule.TargetHost != "gitlab.example.com" {
+		t.Fatalf("rewrite target_host = %q, want %q", rule.TargetHost, "gitlab.example.com")
+	}
+	if rule.TargetGroup != "commons" {
+		t.Fatalf("rewrite target_group = %q, want %q", rule.TargetGroup, "commons")
+	}
+	if rule.AuthModule != "gitlab" {
+		t.Fatalf("rewrite auth_module = %q, want %q", rule.AuthModule, "gitlab")
+	}
+}
+
 func TestSingleListenerHostDispatchConfigParses(t *testing.T) {
 	cfgText := `[server]
 address = ":9999"
@@ -244,6 +286,49 @@ base_url = "/relative"
 	_, err := initConfig(path, "TORU_")
 	if err == nil {
 		t.Fatalf("expected npm config with relative base_url to be rejected")
+	}
+}
+
+func TestNPMRewriteScopeConflictWithProtectedScopeRejected(t *testing.T) {
+	cfgText := `[server]
+address = ":9999"
+log_level = "info"
+
+[[listeners]]
+name = "npm"
+address = ":8081"
+protocols = ["npm"]
+
+[protocols.npm]
+enabled = true
+upstream = "https://registry.npmjs.org"
+metadata_ttl = "5m"
+base_url = "https://npm.example.com"
+
+[[protocols.npm.rewrite_rules]]
+scope = "@example-commons"
+target_host = "gitlab.example.com"
+target_group = "commons"
+auth_module = "gitlab"
+
+[[protocols.npm.protected_scopes]]
+scope = "@example-commons"
+auth_module = "gitlab"
+`
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(path, []byte(cfgText), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+	os.Args = []string{"toru", "--config", path}
+
+	_, err := initConfig(path, "TORU_")
+	if err == nil {
+		t.Fatalf("expected rewrite/protected scope conflict to be rejected")
 	}
 }
 

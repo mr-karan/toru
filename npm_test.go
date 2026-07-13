@@ -77,6 +77,126 @@ func TestNPMCachePackageKeyAvoidsScopedCollisions(t *testing.T) {
 	}
 }
 
+func TestNPMRewriteRuleTakesPrecedenceOverUpstreamMetadata(t *testing.T) {
+	goPort := freePort(t)
+	npmPort := freePort(t)
+	upstream := newFakeNPMRegistry(t)
+
+	cfgText := `[server]
+address = ":` + strconv.Itoa(goPort) + `"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":` + strconv.Itoa(goPort) + `"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":` + strconv.Itoa(npmPort) + `"
+protocols = ["npm"]
+
+[cache]
+enabled = true
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = "/tmp/toru-cache"
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = "` + upstream.URL + `"
+metadata_ttl = "5m"
+base_url = "http://127.0.0.1:` + strconv.Itoa(npmPort) + `"
+
+[[protocols.npm.rewrite_rules]]
+scope = "@example-commons"
+target_host = "gitlab.example.com"
+target_group = "commons"
+auth_module = "gitlab"
+`
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+
+	waitForHTTP200(t, "http://127.0.0.1:"+strconv.Itoa(goPort)+"/metrics", 10*time.Second)
+
+	resp, body, err := getURL("http://127.0.0.1:" + strconv.Itoa(npmPort) + "/%40example-commons%2Ffoo")
+	if err != nil {
+		t.Fatalf("request rewritten npm metadata: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status=%d body=%q, want 501 so rewrite rule wins over upstream", resp.StatusCode, body)
+	}
+}
+
+func TestNPMRewriteRuleRejectsInvalidLeafNameBeforeUpstream(t *testing.T) {
+	goPort := freePort(t)
+	npmPort := freePort(t)
+	upstream := newFakeNPMRegistry(t)
+
+	cfgText := `[server]
+address = ":` + strconv.Itoa(goPort) + `"
+log_level = "info"
+fetch_timeout = "30s"
+
+[[listeners]]
+name = "go"
+address = ":` + strconv.Itoa(goPort) + `"
+protocols = ["go"]
+
+[[listeners]]
+name = "npm"
+address = ":` + strconv.Itoa(npmPort) + `"
+protocols = ["npm"]
+
+[cache]
+enabled = true
+type = "disk"
+mutable_metadata_ttl = "0s"
+
+[cache.disk]
+path = "/tmp/toru-cache"
+
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
+
+[protocols.npm]
+enabled = true
+upstream = "` + upstream.URL + `"
+metadata_ttl = "5m"
+base_url = "http://127.0.0.1:` + strconv.Itoa(npmPort) + `"
+
+[[protocols.npm.rewrite_rules]]
+scope = "@example-commons"
+target_host = "gitlab.example.com"
+target_group = "commons"
+auth_module = "gitlab"
+`
+	proc := startToruProcess(t, cfgText)
+	defer stopCmd(t, proc)
+
+	waitForHTTP200(t, "http://127.0.0.1:"+strconv.Itoa(goPort)+"/metrics", 10*time.Second)
+
+	resp, body, err := getURL("http://127.0.0.1:" + strconv.Itoa(npmPort) + "/%40example-commons%2F..")
+	if err != nil {
+		t.Fatalf("request invalid rewritten npm metadata: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%q, want 400 for invalid rewritten package leaf", resp.StatusCode, body)
+	}
+}
+
 func TestUnsupportedNPMMutationEndpointRejected(t *testing.T) {
 	goPort := freePort(t)
 	npmPort := freePort(t)

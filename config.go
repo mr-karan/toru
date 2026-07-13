@@ -76,6 +76,7 @@ type NPMProtocolConfig struct {
 	MetadataTTL     time.Duration        `koanf:"metadata_ttl"`
 	BaseURL         string               `koanf:"base_url"`
 	ProtectedScopes []ProtectedScopeRule `koanf:"protected_scopes"`
+	RewriteRules    []NPMRewriteRule     `koanf:"rewrite_rules"`
 }
 
 type ProtectedScopeRule struct {
@@ -166,6 +167,9 @@ func (c *Config) validate() error {
 		parsedBaseURL, err := url.Parse(c.Protocols.NPM.BaseURL)
 		if err != nil || parsedBaseURL.Scheme == "" || parsedBaseURL.Host == "" {
 			return fmt.Errorf("protocols.npm.base_url must be an absolute URL")
+		}
+		if err := validateNPMRewriteRules(c.Protocols.NPM); err != nil {
+			return err
 		}
 	}
 	for _, listener := range c.Listeners {
