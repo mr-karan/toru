@@ -77,15 +77,9 @@ func newProxy(cfg *Config, logger *slog.Logger) (*Proxy, error) {
 		},
 	}
 
-	authenticators := make(map[string]Authenticator)
-	if cfg.Auth.Enabled {
-		for _, module := range cfg.Auth.Modules {
-			auth, err := NewAuthenticator(module)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create authenticator: %w", err)
-			}
-			authenticators[module.Name] = auth
-		}
+	authenticators, err := buildAuthenticators(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Proxy{
@@ -97,57 +91,34 @@ func newProxy(cfg *Config, logger *slog.Logger) (*Proxy, error) {
 	}, nil
 }
 
-
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	requestsTotal.Inc()
 	startTime := time.Now()
+	// Wrap the ResponseWriter immediately so early auth/error returns are counted too.
+	rw := &responseWriter{ResponseWriter: w}
+	defer func() {
+		recordProtocolRequest("go", "proxy", time.Since(startTime), rw.size)
+	}()
 
 	p.logger.Info("Received request",
+		"protocol", "go",
+		"kind", "proxy",
 		"method", r.Method,
 		"path", r.URL.Path,
 		"remote_addr", r.RemoteAddr,
 	)
 
 	if p.cfg.Auth.Enabled {
-		// Extract credentials from the request
-		authMethod, password, ok := r.BasicAuth()
+		authMethod, _, ok := r.BasicAuth()
 		if !ok {
-			http.Error(w, "No username or password provided", http.StatusUnauthorized)
+			http.Error(rw, "No username or password provided", http.StatusUnauthorized)
 			return
 		}
-
-		// Check if the module is enabled
-		auth, ok := p.authenticators[authMethod]
-		if !ok {
-			http.Error(w, "Invalid auth method", http.StatusBadRequest)
-			return
-		}
-
-		// Check if the credentials are valid
-		skip, hasAccess, err := auth.Authenticate(password, r.URL.Path)
-		if err != nil {
-			p.logger.Error("Failed to authenticate", "error", err)
-			if err == ErrorAuthFailed {
-				http.Error(w, "Unauthorized: Invalid access token or insufficient permissions for the GitLab project", http.StatusForbidden)
-				return
-			}
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-			return
-		}
-
-		if !hasAccess && !skip {
-			http.Error(w, "Unauthorized: Invalid access token or insufficient permissions for the GitLab project", http.StatusForbidden)
+		if !authorizeRequest(rw, r, p.authenticators, authMethod, AuthRequest{Protocol: "go", Path: r.URL.Path, Resource: r.URL.Path}) {
 			return
 		}
 	}
 
-	// Wrap the ResponseWriter to capture the response size
-	rw := &responseWriter{ResponseWriter: w}
-
 	p.client.ServeHTTP(rw, r)
-
-	requestDuration.UpdateDuration(startTime)
-	responseSize.Update(float64(rw.size))
 }
 
 // responseWriter wraps http.ResponseWriter to capture the response size

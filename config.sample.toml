@@ -1,12 +1,38 @@
 [server]
-address = ":8888"
+address = ":8888" # legacy go-only default when [[listeners]] is omitted
 log_level = "info"
 fetch_timeout = "30s"
+
+# Legacy go-only mode example:
+# - remove all [[listeners]] blocks
+# - remove [protocols.npm]
+# - optionally remove [protocols.go] too; Toru will synthesize go-only mode from [server].address
+
+# Explicit multi-listener configuration.
+# Omit [[listeners]] to keep legacy go-only behavior on [server].address.
+# You can also configure one shared listener with protocols + hosts aligned by index,
+# for example:
+# [[listeners]]
+# name = "shared"
+# address = ":443"
+# protocols = ["go", "npm"]
+# hosts = ["go.example.com", "npm.example.com"]
+[[listeners]]
+name = "go"
+address = ":8888"
+protocols = ["go"]
+# hosts = ["toru.example.com"]
+
+[[listeners]]
+name = "npm"
+address = ":8889"
+protocols = ["npm"]
+# hosts = ["npm-toru.example.com"]
 
 [cache]
 enabled = true
 type = "disk"
-mutable_metadata_ttl = "0s" # 0 disables persistent cache for /@v/list, /@latest, and mutable .info queries
+mutable_metadata_ttl = "0s" # Go-only mutable metadata cache TTL
 
 [cache.disk]
 path = "/tmp/toru-cache"
@@ -17,14 +43,54 @@ path = "/tmp/toru-cache"
 # access_key = "YOUR_ACCESS_KEY"
 # secret_key = "YOUR_SECRET_KEY"
 
-[auth]
-enabled = false
+[protocols.go]
+enabled = true
+fetch_timeout = "30s"
 
-[auth.modules]
+[protocols.npm]
+enabled = true
+upstream = "https://registry.npmjs.org"
+metadata_ttl = "5m" # npm metadata cache is active for configured disk or S3 cache backends when metadata_ttl > 0
+base_url = "http://127.0.0.1:8889" # required; for shared host-dispatch listeners, set this to the npm host origin
+
+# Optional GitLab-backed rewrite rules.
+# Example: @example-commons/foo -> gitlab.example.com/commons/foo
+# v1 limits:
+# - root package.json required
+# - package.json.name must exactly match the public rewritten package name
+# - tags like v1.2.3 and 1.2.3 are accepted
+# - no monorepo subdir packaging or build steps
+[[protocols.npm.rewrite_rules]]
+scope = "@example-commons"
+target_host = "gitlab.example.com"
+target_group = "commons"
+auth_module = "gitlab"
+
+# Optional npm protected scope auth.
+# Requests under @toru/* require either:
+# - Basic auth username=static password=secret, or
+# - Authorization: Bearer secret
+[[protocols.npm.protected_scopes]]
+scope = "@toru"
+auth_module = "static"
+
+[auth]
+enabled = true
+
+[[auth.modules]]
 name = "gitlab"
 type = "gitlab_access_token"
 options.root_url = "https://gitlab.example.com"
-options.protected_uri = "go.example.com"
+options.protected_uri = "go.example.com" # used for Go auth matching
+# Optional for npm protected scopes mapped into GitLab project prefixes.
+# Npm scope protection itself is configured under [[protocols.npm.protected_scopes]].
+# For npm rewrite rules, the derived repo path is used directly and project_prefix is ignored.
+# options.project_prefix = "team/npm"
+
+[[auth.modules]]
+name = "static"
+type = "static_token"
+options.token = "secret"
 
 [[rewrite_rules]]
 vanity_path = "example.com/mymodule"

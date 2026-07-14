@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -165,7 +167,7 @@ type s3Cacher struct {
 	logger *slog.Logger
 }
 
-func newS3Cacher(cfg *Config, logger *slog.Logger) (goproxy.Cacher, error) {
+func loadAWSConfig(cfg *Config) (aws.Config, error) {
 	ctx := context.Background()
 	awsCfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(cfg.Cache.S3.Region),
@@ -176,7 +178,15 @@ func newS3Cacher(cfg *Config, logger *slog.Logger) (goproxy.Cacher, error) {
 		)),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+		return aws.Config{}, fmt.Errorf("failed to load AWS config: %w", err)
+	}
+	return awsCfg, nil
+}
+
+func newS3Cacher(cfg *Config, logger *slog.Logger) (goproxy.Cacher, error) {
+	awsCfg, err := loadAWSConfig(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	client := s3.NewFromConfig(awsCfg)
@@ -287,6 +297,120 @@ func newDiskCacher(path string, logger *slog.Logger) goproxy.Cacher {
 	return &diskCacher{
 		cacher: goproxy.DirCacher(path),
 		logger: logger,
+	}
+}
+
+type npmCacheStore interface {
+	Get(key string) ([]byte, time.Time, error)
+	Put(key string, body []byte) error
+	Delete(key string) error
+}
+
+type diskNPMCacheStore struct {
+	root string
+}
+
+func (s *diskNPMCacheStore) path(key string) string {
+	return filepath.Join(s.root, filepath.FromSlash(key))
+}
+
+func (s *diskNPMCacheStore) Get(key string) ([]byte, time.Time, error) {
+	path := s.path(key)
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	return body, info.ModTime(), nil
+}
+
+func (s *diskNPMCacheStore) Put(key string, body []byte) error {
+	path := s.path(key)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, body, 0o644)
+}
+
+func (s *diskNPMCacheStore) Delete(key string) error {
+	path := s.path(key)
+	err := os.Remove(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+type s3NPMCacheStore struct {
+	client *s3.Client
+	bucket string
+}
+
+func (s *s3NPMCacheStore) Get(key string) ([]byte, time.Time, error) {
+	output, err := s.client.GetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		var nsk *types.NoSuchKey
+		if strings.Contains(err.Error(), "NoSuchKey") || errors.As(err, &nsk) {
+			return nil, time.Time{}, fs.ErrNotExist
+		}
+		return nil, time.Time{}, err
+	}
+	defer output.Body.Close()
+	body, err := io.ReadAll(output.Body)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	modTime := time.Time{}
+	if output.LastModified != nil {
+		modTime = *output.LastModified
+	}
+	return body, modTime, nil
+}
+
+func (s *s3NPMCacheStore) Put(key string, body []byte) error {
+	reader := bytes.NewReader(body)
+	_, err := s.client.PutObject(context.Background(), &s3.PutObjectInput{
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(key),
+		Body:          reader,
+		ContentLength: aws.Int64(int64(len(body))),
+		ContentType:   aws.String("application/octet-stream"),
+	})
+	return err
+}
+
+func (s *s3NPMCacheStore) Delete(key string) error {
+	_, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	return err
+}
+
+func newNPMCacheStore(cfg *Config) (npmCacheStore, error) {
+	if !cfg.Cache.Enabled {
+		return nil, nil
+	}
+	switch cfg.Cache.Type {
+	case "disk":
+		if cfg.Cache.Disk.Path == "" {
+			return nil, nil
+		}
+		return &diskNPMCacheStore{root: cfg.Cache.Disk.Path}, nil
+	case "s3":
+		awsCfg, err := loadAWSConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return &s3NPMCacheStore{client: s3.NewFromConfig(awsCfg), bucket: cfg.Cache.S3.Bucket}, nil
+	default:
+		return nil, nil
 	}
 }
 
