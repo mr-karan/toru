@@ -94,7 +94,22 @@ toru_cache_errors_total: Total cache errors
 ```
 
 
-## Authentication for Private Repositories
+## Authentication for private repositories
+
+Toru can use separate credentials for upstream fetches and client access
+checks. Keep these credentials separate.
+
+### Upstream GitLab credential
+
+Toru needs a server-side Git credential to fetch private modules on a cache
+miss. For a GitLab fine-grained personal access token, grant:
+
+- **Resource:** `Code`
+- **Permission:** `Download`
+- **Boundary:** only the projects or groups that contain the modules
+
+The upstream credential does not need API, registry, or write permissions. Do
+not put it in client configuration or commit it to the repository.
 
 ### For the Proxy
 
@@ -117,7 +132,7 @@ Add this to your `.gitconfig`
 	insteadOf = https://gitlab.example.com
 ```
 
-### Client-side Authentication
+### Client-side authentication
 
 Toru provides support for client-side authentication through authentication modules.
 
@@ -131,13 +146,25 @@ options.root_url = "https://gitlab.example.com"
 options.protected_uri = "go.example.com"
 ```
 
-#### GitLab Access Token
+#### GitLab access token
 
-By providing the GitLab access token in the basic auth, clients can authenticate 
-with the GitLab API to check if the user has access to the repository.
+Clients send a GitLab token as basic authentication. Toru uses that token to
+call the GitLab project lookup API and check whether the client can access the
+module project.
+
+For a GitLab fine-grained personal access token, grant:
+
+- **Resource:** `Project`
+- **Permission:** `Read`
+- **Boundary:** only the projects or groups that contain the modules
+
+The client token only needs project-read access for this check. It does not
+need the upstream `Code: Download` permission unless the same token also
+fetches repositories outside Toru.
 
 To authenticate using the access token, use the following command:
 
 ```bash
-export GOPROXY=https://gitlab:<access_token>@toru.example.com:9443
+export TORU_TOKEN='<access-token>'
+export GOPROXY="https://gitlab:${TORU_TOKEN}@toru.example.com:9443"
 ```
